@@ -1,0 +1,8 @@
+{
+  "name": "moneywiz-mcp-agent",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "frida-objc-bridge": "8.0.6"
+  }
+}

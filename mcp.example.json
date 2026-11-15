@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "moneywiz": { "command": "uvx", "args": ["moneywiz-mcp"] }
+  }
+}

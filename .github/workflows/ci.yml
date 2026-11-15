@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync --locked
+      - run: uvx ruff check src tests scripts --select F,E9,B,SIM --line-length 120
+      - run: uv run pytest -q
+      - name: Agent bundle is up to date
+        run: |
+          (cd agent && npm ci)
+          uv run scripts/build_agent.py
+          git diff --exit-code -- src/moneywiz_mcp/agent.js

@@ -1,0 +1,48 @@
+[project]
+name = "moneywiz-mcp"
+version = "0.1.0"
+description = "Unofficial MCP server for MoneyWiz on macOS: drives the running app's own business methods"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+authors = [{ name = "Kyle" }]
+requires-python = ">=3.11"
+keywords = ["mcp", "moneywiz", "personal-finance", "macos", "frida", "model-context-protocol"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: MacOS X",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Office/Business :: Financial :: Accounting",
+]
+dependencies = ["mcp>=1.26,<2", "pydantic>=2.11,<3", "frida>=17.2,<18"]
+
+[project.urls]
+Homepage = "https://github.com/kyledh/moneywiz-mcp"
+Repository = "https://github.com/kyledh/moneywiz-mcp"
+Issues = "https://github.com/kyledh/moneywiz-mcp/issues"
+
+[project.scripts]
+moneywiz-mcp = "moneywiz_mcp.server:main"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/moneywiz_mcp"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "agent/src", "agent/package.json", "agent/package-lock.json", "scripts",
+           "README.md", "ARCHITECTURE.md", "STATUS.md", "LICENSE", "THIRD_PARTY_NOTICES.md"]
+
+[dependency-groups]
+dev = ["pytest>=8,<10"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
