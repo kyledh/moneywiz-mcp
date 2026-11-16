@@ -87,8 +87,13 @@ absolute path from `which moneywiz-mcp` or `which uvx`.
 Then ask the client to call `moneywiz_status`: it reports the app version, the
 open database and ledger totals. If MoneyWiz is not running you get a clear
 error; open the app and retry. The server reconnects by itself after MoneyWiz
-restarts. Set the environment variable `MONEYWIZ_LAUNCH=1` to let the server
-open MoneyWiz when it is not running.
+restarts.
+
+To let the server open MoneyWiz (in the background) when it is not running,
+set `MONEYWIZ_LAUNCH=1`: `claude mcp add --scope user -e MONEYWIZ_LAUNCH=1
+moneywiz -- moneywiz-mcp`, or `"env": {"MONEYWIZ_LAUNCH": "1"}` in a JSON
+config. The first call then waits for the app and its ledger and returns in a
+few seconds. A ledger behind a passcode still has to be unlocked by hand.
 
 ## Tools
 
@@ -126,7 +131,10 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
   the amount in the account's currency; the rate is derived, or pass
   `exchange_rate`.
 * **Transfers** create, edit and delete both legs together. Across currencies,
-  give `transfer_amount` (what arrives) or `transfer_exchange_rate`.
+  give `transfer_amount` (what arrives) or `transfer_exchange_rate`. As with a
+  transfer entered in the app, MoneyWiz then shows its "transfer between A and
+  B succeeded" notice unless one of the two accounts is open on screen. The
+  notice stays until you dismiss it, and MoneyWiz will not quit while it is up.
 * **Trades** buy or sell by symbol; a first buy creates the holding, and
   MoneyWiz recalculates shares, cost basis and the account's cash.
 * Unknown payee and tag names are created, as in the app. Unknown categories
@@ -177,7 +185,9 @@ MONEYWIZ_LIVE_TESTS=1 uv run pytest -q tests/test_live.py
 
 The live suite writes to the real ledger: it creates everything under an
 `MCP-TEST-` prefix, removes it again (also after failures), and asserts that
-account, transaction, category, payee and tag counts end where they started.
+account, transaction, category, payee and tag counts, and the positions of your
+accounts, groups and categories, end where they started. The transfer test
+leaves MoneyWiz's "transfer succeeded" notice on screen; dismiss it with OK.
 
 The compiled agent is checked in at `src/moneywiz_mcp/agent.js`. After editing
 `agent/src/agent.js`, rebuild it:
