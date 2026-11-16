@@ -282,6 +282,21 @@ def moneywiz_set_transaction_status(
     return transactions.set_status(transaction_id, status)
 
 
+@mcp.tool(annotations=WRITE)
+def moneywiz_adjust_balance(
+    account: AccountRef,
+    balance: Annotated[str, Field(description="The account's actual balance on that date, e.g. from a statement")],
+    date: Annotated[str, Field(description="YYYY-MM-DD (the end of that local day) or ISO 8601 timestamp")],
+    description: str = "", memo: str = "",
+    currency: Annotated[str | None, Field(default=None, description=(
+        "Forex accounts: the currency whose balance this is"))] = None,
+) -> dict:
+    """Reconcile an account to a known balance: MoneyWiz books the difference from its own running balance
+    on that date as a balance adjustment. To change one, delete it and adjust again."""
+    return transactions.adjust_balance(account=account, balance=balance, date_=date, description=description,
+                                       memo=memo, currency=currency)
+
+
 @mcp.tool(annotations=DESTRUCTIVE)
 def moneywiz_delete_transaction(transaction_id: str) -> dict:
     """Delete a transaction. Both legs go for a transfer."""

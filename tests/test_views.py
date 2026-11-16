@@ -59,6 +59,18 @@ def test_transaction_view_links_transfer_legs():
     assert in_leg["transfer_from_id"] == "A4" and in_leg["other_leg_id"] == "T2"
 
 
+def test_balance_adjustment_reports_the_balance_it_set():
+    cash = transaction_view({"$ref": "ReconcileTransaction", "gid": "R1", "amount": -20.0, "status": 2, "reconciled": 0,
+                             "account.currencyName": "CNY", "reconcileAmount": 50.0, "originalCurrency": "CNY"})
+    assert cash["kind"] == "reconcile" and cash["amount"] == "-20" and cash["balance_set_to"] == "50"
+    fx = transaction_view({"$ref": "ReconcileTransaction", "gid": "R2", "amount": 667.12, "status": 2, "reconciled": 0,
+                           "account.currencyName": "CNY", "reconcileAmount": 667.12, "reconcileNumberOfShares": 100.0,
+                           "originalCurrency": "USD", "originalAmount": 100.0, "originalExchangeRate": 0.0,
+                           "investmentHolding.symbol": "USD", "numberOfShares": 100.0, "pricePerShare": 0.0})
+    assert fx["balance_set_to"] == {"currency": "USD", "amount": "100"}
+    assert "original" not in fx and "symbol" not in fx
+
+
 def test_decode_unwraps_agent_tags():
     assert decode({"$date": 1767225600}) == "2026-01-01T00:00:00+00:00"
     assert decode({"$dec": "12.50"}) == "12.50"
