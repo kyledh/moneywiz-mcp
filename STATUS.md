@@ -19,7 +19,7 @@ starting values (`tests/test_live.py`).
 | Investments | holdings, shares, price, cost basis | buy, sell, edit trade, delete trade, create/delete holding, manual price, share count, cost basis | buy → second buy → edit → sell → delete, with shares, cost basis and cash checked at each step |
 | Loans | accounts, payment plan, full installment schedule | — | reads |
 | Budgets | definition, limit, spent, remaining, monitored accounts/categories | — | reads |
-| Scheduled transactions | definition, repeat period, app-computed upcoming dates | — | reads |
+| Scheduled transactions | definition, next due date, repeat rule, app-computed upcoming dates, completion | expense, income, transfer: create, update, delete, skip, execute (with an amount override) | monthly bill with category, tags and payee: edit → execute → skip → execute a different amount → new rule; weekly series of 3 with weekend handling to completion; last-weekday-of-month rule; transfer with both legs; one-off |
 
 ## Not covered yet
 
@@ -32,7 +32,6 @@ starting values (`tests/test_live.py`).
   `updateBudget:…`, `updateRepeatableBudget:…`, `deleteBudget:`, budget groups.
 * **Loan creation and payment-plan edits**: `createLoanAccountForUser:…` takes 28
   arguments including a generated payment plan.
-* **Scheduled transaction writes**: create, update, skip, execute now.
 * **Splitting one transaction across accounts**:
   `createSplitedWithdrawTransactionForAccounts:…`.
 * **Reconcile transactions**: `createReconcileTransactionForAccount:…`.
@@ -41,6 +40,13 @@ starting values (`tests/test_live.py`).
 * Archiving is checked by hand, not by the live suite: MoneyWiz moves an
   archived account to "no group" and renumbers the user's real ungrouped
   accounts, which the suite must not touch.
+* Scheduled transactions: loan payment schedules are read-only (MoneyWiz
+  derives them from the loan's payment plan). Fees and categories on
+  scheduled transfers, foreign-currency schedules and cross-currency
+  scheduled transfers are not offered. MoneyWiz has no business method to
+  pause a schedule. Its execute method would record a completed series'
+  last occurrence again, so the server refuses to execute or skip a schedule
+  MoneyWiz reports as completed.
 * Reconcile and budget-transfer transactions are read-only; `update_transaction`
   refuses them with a clear message. Investment buys and sells are edited with
   `update_trade`.
@@ -81,7 +87,14 @@ iCloud sync stay with MoneyWiz.
 On build 466 every write tool was run under a tracer hooked to alert
 presentation (`presentViewController:`, `MWAlertViewHelper`), `MBProgressHUD`,
 user notifications, sounds, window ordering and activation, and URL opening.
-The only reaction was the "transfer succeeded" alert, which the server skips
-for its own transfers. `set_default_currency` was not exercised, to leave
+The only reactions were the "transfer succeeded" alert, which the server skips
+for its own transfers, and the "all payments are completed: delete or keep this
+scheduled transaction?" alert that
+`-[iphoneMoneyWizViewController onScheduledWaitToExecuteCountChanged:]`
+schedules when a one-off has run or a series has recorded its last occurrence,
+which the server skips for its own scheduled-transaction calls. MoneyWiz also
+updates its Dock badge (`-[iosMoneyWizAppDelegate updateAppBadgeNumber]`, the
+count of due bills) after scheduled-transaction changes, as it does for edits
+in the app. `set_default_currency` was not exercised, to leave
 the ledger's currency alone. With `MONEYWIZ_LAUNCH=1` the app is started
 hidden (`open -g -j`).

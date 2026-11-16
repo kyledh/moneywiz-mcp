@@ -99,7 +99,7 @@ and a ledger behind a passcode still has to be unlocked by hand.
 
 ## Tools
 
-51 tools, all prefixed `moneywiz_`:
+56 tools, all prefixed `moneywiz_`:
 
 | Area | Tools |
 | --- | --- |
@@ -111,7 +111,8 @@ and a ledger behind a passcode still has to be unlocked by hand.
 | Currencies | `currency_settings`, `net_worth`, `set_default_currency`, `get_exchange_rate`, `set_exchange_rate`, `clear_exchange_rate`, `set_display_currencies` |
 | Investments | `list_holdings`, `trade`, `update_trade`, `delete_trade`, `create_holding`, `delete_holding`, `set_holding_price`, `set_holding_shares`, `set_holding_cost_basis` |
 | Loans | `list_loans`, `loan_schedule` |
-| Budgets, scheduled | `list_budgets`, `list_scheduled` |
+| Scheduled transactions | `list_scheduled`, `create_scheduled`, `update_scheduled`, `delete_scheduled`, `skip_scheduled`, `execute_scheduled` |
+| Budgets | `list_budgets` |
 
 What is and is not covered yet is listed in [STATUS.md](STATUS.md).
 
@@ -146,6 +147,15 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
   symbol you do not hold opens a short position (negative shares), and a later
   buy covers it. A negative commission is a rebate: a buy then costs
   `shares x price - rebate`.
+* **Scheduled transactions** (bills, recurring income and transfers) repeat
+  every N days, weeks, months or years, optionally on a rule such as the
+  last weekday of the month, with weekend handling and an optional number of
+  occurrences. Nothing is recorded until one is executed (or auto-paid by
+  MoneyWiz); executing records the next due occurrence on its due date, and
+  skipping passes over it. As in MoneyWiz, changing the date or repeat rule,
+  or turning on auto-pay, restarts the schedule's history; other edits keep
+  it. A completed schedule is reported as `finished` and kept. Loan payment
+  schedules are read-only here, as MoneyWiz maintains them from the loan.
 * Unknown payee and tag names are created, as in the app (an existing name is
   reused). Unknown categories are rejected.
 * Read balances from accounts. Never sum transaction rows: they include
@@ -160,8 +170,10 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
   currencies through its currency list; sign, zero, precision, split totals
   and duplicate payee or tag names are left to MoneyWiz, as in its editors.
 * Writes are silent: no dialogs, notifications, sounds, progress overlays or
-  window activation (traced across every write tool on build 466). The one
-  dialog MoneyWiz raises in reaction, "transfer succeeded", is skipped.
+  window activation (traced across every write tool on build 466). The two
+  dialogs MoneyWiz raises in reaction, "transfer succeeded" and "all payments
+  of this scheduled transaction are done: delete or keep it?", are skipped.
+  MoneyWiz does refresh its Dock badge (the number of due bills).
 * Writes wait while MoneyWiz has unsaved changes of its own and are refused if
   they persist for 5 seconds (an open editor), so a half-finished entry is
   never committed for you. Deletions that arrived from another device through

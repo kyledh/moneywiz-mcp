@@ -16,6 +16,7 @@ from moneywiz_mcp.catalog import Catalog
 from moneywiz_mcp.investments import Investments
 from moneywiz_mcp.native import MoneyWizError, Native, s
 from moneywiz_mcp.portfolio import Portfolio
+from moneywiz_mcp.scheduled import Scheduled
 from moneywiz_mcp.settings import Settings
 from moneywiz_mcp.transactions import Transactions
 
@@ -25,8 +26,15 @@ pytestmark = pytest.mark.skipif(os.environ.get("MONEYWIZ_LIVE_TESTS") != "1",
                                 reason="set MONEYWIZ_LIVE_TESTS=1 to run write tests against the real ledger")
 
 
+def drop_scheduled(native: Native):
+    for row in native.query("ScheduledTransactionHandler", fields=["desc", "account.name"])["items"]:
+        if (row.get("desc") or "").startswith(SANDBOX) or (row.get("account.name") or "").startswith(SANDBOX):
+            Scheduled(native).delete(row["gid"])
+
+
 def cleanup(native: Native):
     accounts, catalog, transactions = Accounts(native), Catalog(native), Transactions(native)
+    drop_scheduled(native)
     for account in native.query("Account", where=[["name", "begins", s(SANDBOX)]], fields=["name"])["items"]:
         for row in native.query("Transaction", where=[["account.GID", "eq", s(account["gid"])]], fields=[])["items"]:
             transactions.delete(row["gid"])
@@ -57,6 +65,7 @@ def live():
     group = accounts.create_group(name=SANDBOX + "GROUP", currency="CNY")
     yield {"native": native, "accounts": accounts, "catalog": Catalog(native),
            "transactions": Transactions(native), "settings": Settings(native), "portfolio": Portfolio(native),
+           "scheduled": Scheduled(native),
            "before": before, "order_before": order_before, "group": group["group_id"]}
     cleanup(native)
     try:
@@ -67,7 +76,8 @@ def live():
 
 
 def snapshot(native: Native) -> dict:
-    return {entity: native.count(entity) for entity in ("Account", "Transaction", "Category", "Payee", "Tag")}
+    return {entity: native.count(entity)
+            for entity in ("Account", "Transaction", "Category", "Payee", "Tag", "ScheduledTransactionHandler")}
 
 
 def ordering(native: Native) -> dict:
@@ -416,3 +426,113 @@ def test_manual_holding_and_price(live):
         assert portfolio.holdings(account["id"]) == []
     finally:
         accounts.delete(account["id"])
+
+
+def _transactions_of(native, account_id):
+    return native.query("Transaction", where=[["account.GID", "eq", s(account_id)]], fields=[])["items"]
+
+
+def test_scheduled_bill_lifecycle(live):
+    accounts, catalog, scheduled, transactions = live["accounts"], live["catalog"], live["scheduled"], live["transactions"]
+    account = accounts.create(group_id=live["group"], name=SANDBOX + "BILLS", kind="cash", currency="CNY",
+                              opening_balance="1000")
+    category = catalog.create_category(SANDBOX + "RENT", "expense")
+    try:
+        bill = scheduled.create(kind="expense", account=account["id"], amount_="50", date_="2027-01-15",
+                                description=SANDBOX + "rent", payee=SANDBOX + "LANDLORD", categories=category["id"],
+                                tags=[SANDBOX + "TAG"], memo="m")
+        # Scheduled methods store the amount as given; expenses are passed negative, as the app's editor does.
+        assert bill["amount"] == "-50" and bill["categories"][0]["amount"] == "-50"
+        assert bill["next_due"].startswith("2027-01-15") and bill["repeat"] == {"every": 1, "unit": "month"}
+        assert [x[:10] for x in bill["upcoming_dates"]] == ["2027-02-15", "2027-03-15", "2027-04-15"]
+
+        assert scheduled.update(bill["id"], amount="60")["categories"][0]["amount"] == "-60"
+        paid = scheduled.execute(bill["id"])
+        assert paid["transaction"]["amount"] == "-60" and paid["transaction"]["date"].startswith("2027-01-15")
+        assert paid["scheduled"]["next_due"].startswith("2027-02-15") and paid["scheduled"]["executions"] == 1
+        assert accounts.get(account["id"])["balance"] == "940"
+
+        # Values handed back exactly as stored keep the schedule's history.
+        kept = scheduled.update(bill["id"], description=SANDBOX + "rent2")
+        assert kept["executions"] == 1 and kept["first_date"].startswith("2027-01-15")
+
+        skipped = scheduled.skip(bill["id"])
+        assert skipped["skipped"].startswith("2027-02-15") and skipped["scheduled"]["next_due"].startswith("2027-03-15")
+        assert len(_transactions_of(live["native"], account["id"])) == 1
+
+        partial = scheduled.execute(bill["id"], "55")
+        assert partial["transaction"]["amount"] == "-55" and partial["transaction"]["categories"][0]["amount"] == "-55"
+        assert partial["scheduled"]["amount"] == "-60"
+
+        # MoneyWiz's rule: a new repeat rule restarts the schedule from its date.
+        weekly = scheduled.update(bill["id"], repeat="week", every=2)
+        assert weekly["repeat"] == {"every": 14, "unit": "day"} and weekly["executions"] == 0
+        assert weekly["first_date"].startswith("2027-04-15")
+
+        removed = scheduled.delete(bill["id"])
+        assert removed["deleted"] == bill["id"] and live["native"].get("ScheduledTransactionHandler", bill["id"]) is None
+        assert len(_transactions_of(live["native"], account["id"])) == 2, "recorded transactions stay"
+    finally:
+        drop_scheduled(live["native"])
+        for row in _transactions_of(live["native"], account["id"]):
+            transactions.delete(row["gid"])
+        accounts.delete(account["id"])
+        for payee in catalog.payees(SANDBOX):
+            catalog.delete("Payee", payee["id"])
+        for tag in [x for x in catalog.tags() if x["name"].startswith(SANDBOX)]:
+            catalog.delete("Tag", tag["id"])
+        catalog.delete("Category", category["id"])
+
+
+def test_scheduled_series_rules_and_transfers(live):
+    accounts, scheduled, transactions = live["accounts"], live["scheduled"], live["transactions"]
+    source = accounts.create(group_id=live["group"], name=SANDBOX + "PAY", kind="cash", currency="CNY",
+                             opening_balance="500")
+    target = accounts.create(group_id=live["group"], name=SANDBOX + "SAVE", kind="cash", currency="CNY")
+    try:
+        series = scheduled.create(kind="income", account=source["id"], amount_="300", date_="2027-01-01",
+                                  repeat="week", occurrences=3, weekends="after", description=SANDBOX + "pay")
+        assert series["amount"] == "300" and series["occurrences"] == 3 and series["weekends"] == "after"
+        assert series["end_date"].startswith("2027-01-15")
+        assert [x[:10] for x in series["upcoming_dates"]] == ["2027-01-08", "2027-01-15"], "stops at the end"
+        for _ in range(3):
+            last = scheduled.execute(series["id"])
+        assert last["transaction"]["date"].startswith("2027-01-15")
+        assert last["scheduled"]["finished"] is True and "next_due" not in last["scheduled"]
+        with pytest.raises(MoneyWizError):
+            scheduled.execute(series["id"])  # MoneyWiz itself would record the last date again
+        assert accounts.get(source["id"])["balance"] == "1400"
+
+        month_end = scheduled.create(kind="expense", account=source["id"], amount_="9.99", date_="2027-01-29",
+                                     week_of_month="last", day_of_week="weekday", description=SANDBOX + "lastweekday")
+        assert month_end["on"] == {"week_of_month": "last", "day_of_week": "weekday"}
+        assert [x[:10] for x in month_end["upcoming_dates"]] == ["2027-02-26", "2027-03-31", "2027-04-30"]
+
+        transfer = scheduled.create(kind="transfer", account=source["id"], transfer_to=target["id"], amount_="100",
+                                    date_="2027-01-20", description=SANDBOX + "save")
+        assert transfer["amount"] == "-100" and transfer["transfer_to_id"] == target["id"]
+        moved = scheduled.execute(transfer["id"])
+        assert moved["transaction"]["kind"] == "transfer_out" and moved["transaction"]["other_leg_id"]
+        assert [accounts.get(x["id"])["balance"] for x in (source, target)] == ["1300", "100"]
+        changed = scheduled.update(transfer["id"], amount="120")
+        assert changed["amount"] == "-120" and changed["executions"] == 1
+
+        once = scheduled.create(kind="expense", account=source["id"], amount_="5", date_="2027-02-01", repeat="none",
+                                description=SANDBOX + "once")
+        assert once["repeats"] is False and "upcoming_dates" not in once
+        assert scheduled.execute(once["id"])["scheduled"]["finished"] is True
+
+        for bad in (dict(repeat="month", every=0), dict(repeat="week", occurrences=0), dict(repeat="fortnight"),
+                    dict(weekends="sometimes")):
+            with pytest.raises(MoneyWizError):
+                scheduled.create(kind="expense", account=source["id"], amount_="1", date_="2027-01-01",
+                                 description=SANDBOX + "bad", **bad)
+        assert live["native"].status()["context"]["pending"] == 0
+    finally:
+        drop_scheduled(live["native"])
+        for account in (source, target):
+            for row in _transactions_of(live["native"], account["id"]):
+                if live["native"].get("Transaction", row["gid"]):  # a transfer's other leg goes with it
+                    transactions.delete(row["gid"])
+            accounts.delete(account["id"])
+
