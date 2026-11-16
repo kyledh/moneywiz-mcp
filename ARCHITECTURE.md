@@ -57,9 +57,13 @@
    counts: saving them changes nothing. When MoneyWiz follows one of our calls
    with an unsaved change of its own (pricing a new forex position), `settle`
    saves it only if every object a save would write is one the caller names.
+   MoneyWiz's purge of year-old autocomplete history (scheduled whenever a
+   history item is created, unsaved) is upkeep, not an edit, and does not
+   count either.
 10. **Silence only the dialogs our own calls raise.** A call may name an app
    observer that does nothing but present UI (the "transfer succeeded" alert,
    or the "delete or keep this completed scheduled transaction?" prompt).
+   `native.ALWAYS_QUIET` adds the budget warning alert to every saving call.
    For that call only, the agent swaps the method's implementation for a
    no-op and puts the original back before the main-queue turn ends; the
    observers run inside the business call, so they are skipped, and the

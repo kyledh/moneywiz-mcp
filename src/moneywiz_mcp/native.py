@@ -26,6 +26,10 @@ AGENT = Path(__file__).with_name("agent.js")
 SIGNATURES = json.loads(Path(__file__).with_name("signatures.json").read_text())
 # How long a write waits for MoneyWiz's own unsaved objects to clear.
 UNSAVED_WAIT = 5.0
+# Main-window observers that only put up an alert, skipped for every saving
+# call: any transaction change can push a budget over, and MoneyWiz answers
+# with a "the following budgets are low / exceeded" alert.
+ALWAYS_QUIET = (("iphoneMoneyWizViewController", "onBudgetsWarning:"),)
 
 
 class MoneyWizError(RuntimeError):
@@ -163,6 +167,8 @@ class Native:
         """Call a business method. quiet names [class, selector] handlers that
         only present UI, to be skipped while this call runs (see agent.js)."""
         spec = {"target": target, "selector": selector, "args": args, "fields": fields or [], "save": save}
+        if save:
+            quiet = tuple(quiet) + ALWAYS_QUIET
         if quiet:
             spec["quiet"] = [list(handler) for handler in quiet]
         if encoding is None and target == "manager":
