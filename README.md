@@ -99,14 +99,14 @@ and a ledger behind a passcode still has to be unlocked by hand.
 
 ## Tools
 
-56 tools, all prefixed `moneywiz_`:
+57 tools, all prefixed `moneywiz_`:
 
 | Area | Tools |
 | --- | --- |
 | Status | `status` |
 | Accounts | `list_accounts`, `get_account`, `create_account`, `update_account`, `archive_account`, `delete_account`, `move_account` |
 | Account groups | `list_account_groups`, `create_account_group`, `update_account_group`, `delete_account_group` |
-| Transactions | `list_transactions`, `get_transaction`, `create_transaction`, `update_transaction`, `set_transaction_status`, `delete_transaction` |
+| Transactions | `list_transactions`, `get_transaction`, `create_transaction`, `update_transaction`, `set_transaction_status`, `delete_transaction`, `adjust_balance` |
 | Categories, payees, tags | `list_categories`, `list_payees`, `list_tags`, `create_category`, `update_category`, `reorder_categories`, `create_payee`, `create_tag`, `rename_payee`, `rename_tag`, `delete_catalog_object`, `merge_catalog_objects`, `catalog_usage` |
 | Currencies | `currency_settings`, `net_worth`, `set_default_currency`, `get_exchange_rate`, `set_exchange_rate`, `clear_exchange_rate`, `set_display_currencies` |
 | Investments | `list_holdings`, `trade`, `update_trade`, `delete_trade`, `create_holding`, `delete_holding`, `set_holding_price`, `set_holding_shares`, `set_holding_cost_basis` |
@@ -147,6 +147,12 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
   symbol you do not hold opens a short position (negative shares), and a later
   buy covers it. A negative commission is a rebate: a buy then costs
   `shares x price - rebate`.
+* **Balance adjustments** (`adjust_balance`) are MoneyWiz's "adjust balance":
+  give the balance a statement shows on a date and MoneyWiz books the
+  difference from its own running balance as a reconcile transaction. A bare
+  date means the end of that day. Forex accounts adjust one currency at a
+  time. To change an adjustment, delete it and adjust again, as MoneyWiz's
+  editor does.
 * **Scheduled transactions** (bills, recurring income and transfers) repeat
   every N days, weeks, months or years, optionally on a rule such as the
   last weekday of the month, with weekend handling and an optional number of

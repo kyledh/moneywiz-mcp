@@ -1,6 +1,8 @@
 """D02 transactions: expenses, income, transfers, refunds and their state."""
 from __future__ import annotations
 
+import re
+from datetime import timedelta
 from decimal import Decimal
 
 from .accounts import Accounts
@@ -37,7 +39,8 @@ FIELDS = ["date", "amount", "desc", "notes", "status", "reconciled", "voidCheque
           "recipientAccount.GID", "recipientAccount.name", "recipientTransaction.GID", "recipientTransaction.amount",
           "senderTransaction.GID", "senderTransaction.account.GID", "senderTransaction.account.name",
           "investmentHolding.GID", "investmentHolding.symbol",
-          "withdrawTransactionsLinks.withdrawTransaction.GID", "refundTransactionsLinks.refundTransaction.GID"]
+          "withdrawTransactionsLinks.withdrawTransaction.GID", "refundTransactionsLinks.refundTransaction.GID",
+          "reconcileAmount", "reconcileNumberOfShares"]
 
 CREATE_EXPENSE = ("createWithdrawTransactionForAccount:GID:description:payeeName:originalCurrency:originalAmount:"
                   "originalExchangeRate:amount:fee:date:categories:categoriesMoney:checkbookNumber:imagesPaths:notes:"
@@ -65,6 +68,11 @@ EDIT_TRANSFER = ("editTransferWithdrawTransaction:fromAccount:toAccount:descript
                  "exchangeRate:toAmount:toAmountCurrency:fee:feeCurrency:date:receiveDate:categories:categoriesMoney:"
                  "payeeName:imagesPaths:checkbookNumber:tagsNames:")
 DELETE = "deleteTransactionWithBalanceRecalculation:notifyAccountsBalanceChange:"
+# MoneyWiz's "adjust balance": it books the difference between the balance
+# given and its own running balance on that date. Forex accounts adjust one
+# currency position at a time.
+RECONCILE = "createReconcileTransactionForAccount:description:notes:ballance:date:"
+RECONCILE_POSITION = "createReconcileTransactionForAccount:description:notes:date:symbol:reconciledNumberOfShares:"
 # MoneyWiz's main window answers each new transfer with a "transfer between A
 # and B succeeded" dialog. This observer does nothing else, and it runs inside
 # the create call, so it is skipped for transfers made through the server.
@@ -120,12 +128,20 @@ def view(row: dict) -> dict:
         out["other_leg_id"] = row.get("senderTransaction.GID")
     if kind == "refund":
         out["refund_of_ids"] = row.get("withdrawTransactionsLinks.withdrawTransaction.GID") or None
+    if kind == "reconcile":
+        if row.get("reconcileNumberOfShares") is not None and row.get("originalCurrency"):
+            out["balance_set_to"] = {"currency": row["originalCurrency"],
+                                     "amount": stored(row["reconcileNumberOfShares"])}
+        else:
+            out["balance_set_to"] = stored(row.get("reconcileAmount"))
     if row.get("refundTransactionsLinks.refundTransaction.GID"):
         out["refunded_by_ids"] = row["refundTransactionsLinks.refundTransaction.GID"]
-    if row.get("investmentHolding.symbol"):
+    if row.get("investmentHolding.symbol") and kind != "reconcile":  # an adjustment states its position above
         out["symbol"] = row["investmentHolding.symbol"]
         out["shares"] = stored(row.get("numberOfShares"))
         out["price_per_share"] = stored(row.get("pricePerShare"))
+    if kind == "reconcile":
+        out.pop("original", None)
     return clean(out) | {"reconciled": out["reconciled"]}
 
 
@@ -348,8 +364,11 @@ class Transactions:
         current = view(row)
         kind = current["kind"]
         if kind not in EDITABLE:
+            if kind == "reconcile":
+                raise MoneyWizError("A balance adjustment is not edited in place: delete it and call "
+                                    "moneywiz_adjust_balance again (MoneyWiz's editor does the same)")
             raise MoneyWizError(f"{kind} transactions cannot be edited through this tool yet "
-                                "(investment, reconcile and budget-transfer records are read-only here)")
+                                "(investment trades use moneywiz_update_trade; budget transfers are read-only)")
         allowed = {"amount", "date", "description", "memo", "payee", "categories", "tags", "fee", "cheque_number",
                    "account", "original_amount", "original_currency", "exchange_rate", "transfer_to",
                    "transfer_amount", "transfer_exchange_rate", "receive_date"}
@@ -444,6 +463,37 @@ class Transactions:
                     n(float(fee_value)), date(when), *tail]
             self.n.invoke("manager", EDIT_REFUND, args)
         return self.get(transaction_id)
+
+    # ------------------------------------------------------------ balance adjustment
+
+    def adjust_balance(self, *, account: str, balance, date_: str, description: str = "", memo: str = "",
+                       currency: str | None = None) -> dict:
+        """Set an account's balance on a date, as MoneyWiz's "adjust balance" does."""
+        target = self.accounts.resolve(account)
+        value = amount(balance, field="balance")
+        # A bare day means its end, so the whole day counts, as for a statement's closing balance.
+        when = parse_bound(date_, end=True, field="date") - timedelta(seconds=1) \
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_ or "") else parse_when(date_)
+        if target["kind"] == "forex":
+            if not currency:
+                raise MoneyWizError("A forex account holds a balance per currency; give currency")
+            code = currency_code(self.n, currency)
+            args = [ref("Account", target["id"]), s(description or ""), s(memo or ""), date(when), s(code),
+                    n(float(value))]
+            result = self.n.invoke("manager", RECONCILE_POSITION, args, quiet=TRANSFER_NOTICE)
+            # A new position is priced by MoneyWiz a moment later and left unsaved,
+            # which would hold up every later write; save that, and only that.
+            positions = self.n.query("InvestmentHolding", where=[["investmentAccount.GID", "eq", s(target["id"])],
+                                                                 ["symbol", "eq", s(code)]], fields=[])["items"]
+            if positions:
+                self.n.settle([("InvestmentHolding", p["gid"]) for p in positions])
+        else:
+            if currency and currency_code(self.n, currency) != target["currency"]:
+                raise MoneyWizError(f"{target['name']!r} keeps its balance in {target['currency']}")
+            args = [ref("Account", target["id"]), s(description or ""), s(memo or ""), n(float(value)), date(when)]
+            result = self.n.invoke("manager", RECONCILE, args, quiet=TRANSFER_NOTICE)
+        created = self._created(result, "reconcile")
+        return {"transaction": created, "account_balance": self.accounts.get(target["id"])["balance"]}
 
     # ------------------------------------------------------------ state & delete
 

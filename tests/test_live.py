@@ -536,3 +536,43 @@ def test_scheduled_series_rules_and_transfers(live):
                     transactions.delete(row["gid"])
             accounts.delete(account["id"])
 
+
+def test_adjust_balance_books_the_difference(live):
+    accounts, transactions, native = live["accounts"], live["transactions"], live["native"]
+    bank = accounts.create(group_id=live["group"], name=SANDBOX + "BANK", kind="checking", currency="CNY",
+                           opening_balance="100")
+    fx = accounts.create(group_id=live["group"], name=SANDBOX + "FXADJ", kind="forex", currency="CNY")
+    try:
+        transactions.create(account=bank["id"], kind="expense", amount_="30", date_="2026-11-10",
+                            description=SANDBOX + "e1")
+        # A bare date means the end of that day, so the noon expense counts.
+        first = transactions.adjust_balance(account=bank["id"], balance="50", date_="2026-11-10",
+                                            description=SANDBOX + "stmt")
+        assert first["transaction"]["kind"] == "reconcile" and first["transaction"]["amount"] == "-20"
+        assert first["transaction"]["balance_set_to"] == "50" and first["account_balance"] == "50"
+        transactions.create(account=bank["id"], kind="expense", amount_="5", date_="2026-11-12",
+                            description=SANDBOX + "e2")
+        second = transactions.adjust_balance(account=bank["id"], balance="60", date_="2026-11-11",
+                                             description=SANDBOX + "stmt2")
+        assert second["transaction"]["amount"] == "10" and second["account_balance"] == "55"
+        with pytest.raises(MoneyWizError):
+            transactions.update(second["transaction"]["id"], description="x")  # delete and adjust again instead
+        transactions.delete(first["transaction"]["id"])
+        assert accounts.get(bank["id"])["balance"] == "75"
+
+        with pytest.raises(MoneyWizError):
+            transactions.adjust_balance(account=fx["id"], balance="100", date_="2026-11-10")  # which currency?
+        position = transactions.adjust_balance(account=fx["id"], balance="100", currency="USD", date_="2026-11-10",
+                                               description=SANDBOX + "usd")
+        assert position["transaction"]["balance_set_to"] == {"currency": "USD", "amount": "100"}
+        holdings = live["portfolio"].holdings(fx["id"])
+        assert [(h["symbol"], h["shares"]) for h in holdings] == [("USD", "100")]
+        # MoneyWiz prices the new position afterwards without saving; the server saves that, so writes go on.
+        assert native.status()["context"]["pending"] == 0
+    finally:
+        for account in (bank, fx):
+            for row in _transactions_of(native, account["id"]):
+                transactions.delete(row["gid"])
+            for holding in live["portfolio"].holdings(account["id"]):
+                Investments(native).delete_holding(holding["id"], delete_trades=True)
+            accounts.delete(account["id"])
