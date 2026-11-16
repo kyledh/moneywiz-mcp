@@ -11,7 +11,6 @@ import functools
 import json
 import os
 import signal
-import sys
 from typing import Annotated, Any, Literal
 
 from mcp.server.fastmcp import FastMCP
@@ -1072,14 +1071,26 @@ def moneywiz_delete_report(report: str) -> dict:
     return reports.delete(report)
 
 
+def _terminate(*_) -> None:
+    """SIGTERM. A client may send it with the server's input still open; the stdio reader then
+    stays blocked in read(), and the interpreter's normal exit waits for that thread before it
+    runs atexit, so it never finished (up to 0.2.0 the server stopped answering but did not exit).
+    Do here what the exit would do (quit a MoneyWiz the server looks after if nothing holds it,
+    detach from MoneyWiz), then leave without waiting for the reader."""
+    try:
+        lifecycle.at_exit()
+        native.close()
+    finally:
+        os._exit(0)
+
+
 def main() -> None:
     if native._launch:
         native.lifecycle = lifecycle
         lifecycle.start()
+        # A client that closes the server's input ends mcp.run(): a normal exit, which runs this.
         atexit.register(lifecycle.at_exit)
-        # MCP clients stop a server with SIGTERM as well as by closing its input;
-        # exit normally either way so a MoneyWiz it launched is quit.
-        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+        signal.signal(signal.SIGTERM, _terminate)
     mcp.run()
 
 

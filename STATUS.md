@@ -119,7 +119,13 @@ iCloud sync stay with MoneyWiz.
   attached, MoneyWiz takes about 30 s longer to exit, so the server detaches
   as soon as MoneyWiz agrees to quit. Another client's session (an older
   server) can still hold up the exit that long. Servers before 0.1.6 do not
-  take part: they neither keep a MoneyWiz alive nor quit one.
+  take part: they neither keep a MoneyWiz alive nor quit one. Up to 0.2.0 a
+  SIGTERM that arrived while the client kept the server's input open (hermes
+  does) left the server stuck in the interpreter's exit, waiting for its
+  stdio reader: it no longer answered, was not restarted by the client, and
+  never quit a MoneyWiz it ran. Since 0.2.1 SIGTERM does the exit's work and
+  leaves at once (checked with a server attached to MoneyWiz: gone in 0.04 s,
+  MoneyWiz untouched).
 * Attaching needs the one-time permission setup in the README.
 * A write waits up to 5 seconds for MoneyWiz's own unsaved changes to clear
   (it briefly holds a temporary report after every data change) and is
