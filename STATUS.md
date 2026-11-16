@@ -57,6 +57,10 @@ iCloud sync stay with MoneyWiz.
 * A write waits up to 5 seconds for MoneyWiz's own unsaved changes to clear
   (it briefly holds a temporary report after every data change) and is
   refused if they remain, for example while an editor is open.
+* Each new transfer triggers MoneyWiz's own "transfer succeeded" notice
+  (`-[iphoneMoneyWizViewController onTransactionCreated:]`), unless one of its
+  accounts is open on screen. It must be dismissed in the app and blocks
+  quitting MoneyWiz until then. Only executed scheduled transactions skip it.
 * Saved locally is not synced; MoneyWiz uploads to iCloud on its own schedule.
 * Several calls are not atomic: each business call saves independently.
 * Only build 466's `MoneyWizManager` signatures are recorded. On another build,
