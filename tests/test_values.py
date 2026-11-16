@@ -3,7 +3,8 @@ from datetime import datetime, timezone
 import pytest
 
 from moneywiz_mcp.native import MoneyWizError, ni, dec, date as date_arg
-from moneywiz_mcp.values import amount, money, parse_bound, parse_when, show_date, stored
+from moneywiz_mcp.values import (amount, day_start, money, next_day_start, parse_bound, parse_when, show_date,
+                                 show_seconds, stored)
 
 
 def test_amount_accepts_any_finite_number():
@@ -77,3 +78,29 @@ def test_stored_fields_read_back_as_written():
     assert stored(-897.5500000000001) == "-897.55"
     assert stored(1e-9) == "0.000000001"
     assert stored(0.0) == "0" and stored(None) is None
+
+
+# CI runs these in UTC, Asia/Shanghai and America/Los_Angeles. In a zone with daylight
+# saving, a day on the other side of a change from today has another offset.
+@pytest.mark.parametrize("day", ["2026-01-15", "2026-07-01", "2026-03-08", "2026-11-01"])
+def test_local_days_use_that_days_offset(day):
+    midnight = datetime.fromisoformat(day).astimezone()  # the system zone, for that very day
+    start = day_start(day)
+    assert start == midnight and start.utcoffset() == midnight.utcoffset()
+    assert parse_bound(day) == midnight
+    assert parse_when(day).utcoffset() == datetime.fromisoformat(day + "T12:00").astimezone().utcoffset()
+    after = next_day_start(day)
+    assert (after.date() - start.date()).days == 1 and after.hour == 0
+
+
+@pytest.mark.parametrize("day", ["2026-01-15", "2026-07-01"])
+def test_dates_shown_keep_their_local_day(day):
+    midnight = datetime.fromisoformat(day).astimezone()
+    utc = midnight.astimezone(timezone.utc).isoformat()
+    assert show_date(utc).startswith(day + "T00:00:00")
+    assert show_seconds({"$date": midnight.timestamp()}).startswith(day + "T00:00:00")
+    assert show_seconds(None) is None
+
+
+def test_naive_timestamps_are_local_time():
+    assert parse_when("2026-07-01T09:30:00") == datetime(2026, 7, 1, 9, 30).astimezone()

@@ -1,3 +1,4 @@
+import frida
 import pytest
 
 from moneywiz_mcp import native
@@ -57,6 +58,64 @@ def test_quiet_handlers_travel_with_the_call():
     n.invoke("manager", "saveData", [], encoding="B16@0:8", quiet=(("SomeController", "onThing:"),))
     assert n.last[0]["quiet"] == [["SomeController", "onThing:"], *always]
     n.invoke("manager", "saveData", [], encoding="B16@0:8")
-    assert n.last[0]["quiet"] == always, "every saving call skips the budget warning alert"
-    n.invoke("manager", "saveData", [], encoding="B16@0:8", save=False)
-    assert "quiet" not in n.last[0]
+    assert n.last[0]["quiet"] == always, "every write skips the budget warning alert"
+
+
+def test_questions_are_read_only_and_do_not_wait():
+    # A question is answered while MoneyWiz holds unsaved changes (the agent does not
+    # refuse it), so there is nothing to wait for, and nothing is saved or muted.
+    n = Scripted([{"value": ["USD", "CNY"]}])
+    assert n.ask("manager", "currenciesArray", []) == ["USD", "CNY"]
+    spec = n.last[0]
+    assert spec["read_only"] is True and spec["save"] is False and "quiet" not in spec
+    assert spec["encoding"] == native.MANAGER_SIGNATURES["currenciesArray"]
+    assert n.calls == 1
+
+
+class Script:
+    """A loaded agent: is_destroyed as Frida reports it, exports that record calls."""
+
+    def __init__(self, log, fail_with=None):
+        self.is_destroyed, self.log, self.fail_with = False, log, fail_with
+        script = self
+
+        class Exports:
+            def invoke(self, spec):
+                script.log.append(spec["selector"])  # MoneyWiz has the call from here on
+                if script.fail_with:
+                    raise script.fail_with
+                return {"value": None}
+        self.exports_sync = Exports()
+
+
+def connected(scripts):
+    """A Native whose (re)connections hand out the given scripts in turn."""
+    n = Native()
+    pending = list(scripts)
+    def connect(launch=True):
+        n._script = pending.pop(0)
+    n._connect = connect
+    return n
+
+
+@pytest.mark.parametrize("lost", [frida.InvalidOperationError("script has been destroyed"),
+                                  frida.TransportError("connection closed")])
+def test_a_call_lost_while_moneywiz_has_it_is_not_sent_again(lost):
+    # MoneyWiz may have carried the write out (and saved it) before it quit or crashed:
+    # sending it again could record it twice, or crash MoneyWiz a second time.
+    log = []
+    n = connected([Script(log, fail_with=lost), Script(log)])
+    with pytest.raises(MoneyWizError, match="may or may not have been carried out"):
+        n.invoke("manager", "saveData", [], encoding="B16@0:8")
+    assert log == ["saveData"]
+    assert n._script is None, "the next call starts a new connection"
+
+
+def test_a_connection_that_ended_between_calls_is_replaced_before_sending():
+    log = []
+    first, second = Script(log), Script(log)
+    n = connected([first, second])
+    n.invoke("manager", "saveData", [], encoding="B16@0:8")
+    first.is_destroyed = True  # MoneyWiz restarted in between
+    n.invoke("manager", "saveData", [], encoding="B16@0:8")
+    assert log == ["saveData", "saveData"] and n._script is second

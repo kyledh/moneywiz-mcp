@@ -7,13 +7,13 @@ negative, exactly as MoneyWiz's editors pass them.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 
 from .accounts import Accounts
 from .native import Native, MoneyWizError, s, b, i, d, n, ref, arr, date, NIL, currency_code
 from .transactions import Transactions, TRANSFER_NOTICE
-from .values import amount, parse_when, show_date, clean, stored
+from .values import amount, parse_when, show_date, show_seconds, clean, stored
 
 KINDS = {"ScheduledWithdrawTransactionHandler": "expense",
          "ScheduledDepositTransactionHandler": "income",
@@ -61,11 +61,7 @@ SKIP = "skipScheduleTransaction:"
 DELETE = "deleteScheduledTransactionHandler:"
 
 
-def _iso(value) -> str | None:
-    """Raw agent date ({"$date": seconds}) to the local display form."""
-    if not value:
-        return None
-    return show_date(datetime.fromtimestamp(value["$date"], timezone.utc).isoformat())
+_iso = show_seconds  # raw rows (raw=True) keep dates as {"$date": seconds}
 
 
 def view(row: dict, finished: bool = False) -> dict:
@@ -135,8 +131,8 @@ class Scheduled:
         the series' end, so dates after `end` are dropped)."""
         dates = []
         for index in range(1, count + 1):
-            value = self.n.invoke(ref("ScheduledTransactionHandler", scheduled_id), "nextExecuteDateWithNum:",
-                                  [{"i": index}], save=False)["value"]
+            value = self.n.ask(ref("ScheduledTransactionHandler", scheduled_id), "nextExecuteDateWithNum:",
+                               [{"i": index}])
             if not value or (end is not None and datetime.fromisoformat(value).timestamp() > end):
                 break
             dates.append(show_date(value))
@@ -146,9 +142,8 @@ class Scheduled:
         """MoneyWiz's own test for a one-off that has run or a series past its
         last occurrence. Its execute method does not check this and would
         record the last occurrence again."""
-        return bool(self.n.invoke({"cls": "ScheduledTransactionDataManager"}, "isTransactionCompleted:",
-                                  [ref("ScheduledTransactionHandler", scheduled_id)],
-                                  save=False)["value"])
+        return bool(self.n.ask({"cls": "ScheduledTransactionDataManager"}, "isTransactionCompleted:",
+                               [ref("ScheduledTransactionHandler", scheduled_id)]))
 
     def _view(self, row: dict) -> dict:
         out = view(row, self._finished(row["gid"]))

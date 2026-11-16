@@ -32,7 +32,7 @@ EDITABLE = {"expense", "income", "refund", "transfer_out", "transfer_in"}
 
 FIELDS = ["date", "amount", "desc", "notes", "status", "reconciled", "voidCheque", "checkbookNumber", "flags",
           "originalAmount", "originalCurrency", "originalExchangeRate", "fee", "originalFee", "originalFeeCurrency",
-          "numberOfShares", "pricePerShare", "symbol",
+          "numberOfShares", "pricePerShare", "symbol", "investmentSymbol",
           "account.GID", "account.name", "account.currencyName", "payee.GID", "payee.name",
           "tags.GID", "tags.name", "exchangeRate",
           "categoriesAssigments.amount", "categoriesAssigments.category.GID", "categoriesAssigments.category.name",
@@ -102,6 +102,29 @@ RECONCILE_POSITION = "createReconcileTransactionForAccount:description:notes:dat
 # and B succeeded" dialog. This observer does nothing else, and it runs inside
 # the create call, so it is skipped for transfers made through the server.
 TRANSFER_NOTICE = (("iphoneMoneyWizViewController", "onTransactionCreated:"),)
+
+
+# How MoneyWiz stores the amount its editors give it: an expense, or a transfer's
+# sending leg, negated; an income or a refund as given, so a negative income
+# stays negative. A transfer's sending leg also adds its fee to the amount and
+# keeps the amount sent as its original amount.
+GIVEN_SIGN = {"expense": -1, "transfer_out": -1, "income": 1, "refund": 1}
+
+
+def given(stored, sign: int) -> Decimal:
+    """A stored figure as MoneyWiz's editors would give it back (exact; None is 0, never -0)."""
+    value = 0.0 if stored is None else sign * float(stored)
+    return Decimal(repr(value + 0.0))  # + 0.0 turns -0.0 into 0.0
+
+
+def holding_args(row: dict, sign: int) -> list[dict]:
+    """investmentSymbol, symbol and numberOfShares: the forex position or holding an
+    expense or income is booked against. MoneyWiz's edit methods relink the
+    transaction to whatever they are given (nil would unlink it and put its shares
+    back into the position), and store the share count signed like the amount."""
+    shares = row.get("numberOfShares")
+    return [opt_s(row.get("investmentSymbol")), opt_s(row.get("symbol")),
+            NIL if shares is None else n(float(given(shares, sign)))]
 
 
 def _ratio(numerator: Decimal, denominator: Decimal, what: str) -> Decimal:
@@ -464,33 +487,39 @@ class Transactions:
 
         account = self.accounts.resolve(changes["account"]) if changes.get("account") else \
             self.accounts.resolve(current["account_id"])
-        value = amount(changes["amount"], field="amount") if "amount" in changes else \
-            abs(Decimal(current["amount"]))
-        when = parse_when(changes["date"]) if changes.get("date") else parse_when(current["date"])
+        # Unchanged values go back as MoneyWiz's editors would give them (see given()),
+        # so they come back as they were: a negative income stays negative, a
+        # transfer's fee is not added to its amount once more.
+        sign = GIVEN_SIGN[kind]
+        sent = row.get("originalAmount") if kind == "transfer_out" and row.get("originalAmount") is not None \
+            else row.get("amount")
+        unchanged = given(sent, sign)
+        value = amount(changes["amount"], field="amount") if "amount" in changes else unchanged
+        when = parse_when(changes["date"]) if changes.get("date") else parse_when(row["date"])
         description = changes.get("description", current.get("description") or "")
         memo = changes.get("memo", current.get("memo") or "")
-        fee_value = amount(changes["fee"], field="fee") if changes.get("fee") is not None else \
-            Decimal(current.get("fee") or 0)
+        fee_value = amount(changes["fee"], field="fee") if changes.get("fee") is not None else given(row.get("fee"), 1)
         cheque = changes.get("cheque_number", current.get("cheque_number"))
         payee = changes.get("payee", current.get("payee"))
         tags = changes.get("tags", current.get("tags"))
         if "categories" in changes:
             categories = changes["categories"]
         else:
-            categories = [{"category": c["id"], "amount": str(abs(Decimal(c["amount"])))}
-                          for c in current.get("categories") or []]
+            categories = [{"category": c, "amount": str(given(x, sign))}
+                          for c, x in zip(row.get("categoriesAssigments.category.GID") or [],
+                                          row.get("categoriesAssigments.amount") or [], strict=True)]
             # As in the app, a single category follows the new amount; a split
             # keeps its amounts unless a new list is given.
-            if len(categories) == 1 and value != abs(Decimal(current["amount"])):
+            if len(categories) == 1 and value != unchanged:
                 categories[0]["amount"] = str(value)
 
         if kind == "transfer_out":
             target = self.accounts.resolve(changes["transfer_to"]) if changes.get("transfer_to") else \
                 self.accounts.resolve(current["transfer_to_id"])
             other = self.n.get("Transaction", current["other_leg_id"], ["amount", "date"]) if current.get("other_leg_id") else None
-            received_now = abs(Decimal(stored(other["amount"]))) if other else value
+            received_now = given(other["amount"], 1) if other else value
             received_when = parse_when(changes["receive_date"], field="receive_date") if changes.get("receive_date") \
-                else (parse_when(show_date(other["date"])) if other else when)
+                else (parse_when(other["date"]) if other else when)
             if changes.get("transfer_amount") is not None:
                 received = amount(changes["transfer_amount"], field="transfer_amount")
             elif changes.get("transfer_exchange_rate") is not None:
@@ -511,20 +540,23 @@ class Transactions:
             self.n.invoke("manager", EDIT_TRANSFER, args, quiet=TRANSFER_NOTICE)
             return self.get(transaction_id)
 
-        fx_source = {"currency": account["currency"]}
-        if "original_amount" in changes or "original_currency" in changes or "exchange_rate" in changes:
-            original_amount = changes.get("original_amount", (current.get("original") or {}).get("amount"))
-            original_currency = changes.get("original_currency", (current.get("original") or {}).get("currency"))
-            exchange_rate = changes.get("exchange_rate")
-        elif current.get("original") and "amount" not in changes:
-            original_amount = current["original"]["amount"]
-            original_currency = current["original"]["currency"]
-            exchange_rate = current["original"]["exchange_rate"]
+        foreign = row.get("originalCurrency") not in (None, "", account["currency"]) \
+            and row.get("originalAmount") not in (None, 0)
+        if {"original_amount", "original_currency", "exchange_rate"} & set(changes):
+            original_amount = changes.get("original_amount", given(row["originalAmount"], sign) if foreign else None)
+            original_currency = changes.get("original_currency", row["originalCurrency"] if foreign else None)
+            currency, original, rate, _ = self._fx({"currency": account["currency"]}, value, original_amount,
+                                                   original_currency, changes.get("exchange_rate"))
+        elif foreign:
+            # The foreign amount stays as stored; a new amount in the account's currency
+            # changes the rate, as when the two amounts are entered.
+            currency, original = s(row["originalCurrency"]), n(float(row["originalAmount"]))
+            rate = n(float(_ratio(value, abs(given(row["originalAmount"], 1)), "an exchange rate"))) \
+                if "amount" in changes else n(float(row["originalExchangeRate"]))
         else:
-            original_amount = original_currency = exchange_rate = None
-        currency, original, rate, _ = self._fx(fx_source, value, original_amount, original_currency, exchange_rate)
+            currency, original, rate = s(account["currency"]), n(float(value)), n(1.0)
         cats, monies, _ = self._splits(categories, value)
-        tail = [cats, monies, opt_s(cheque), images_arg(row), s(memo), self._tags(tags), NIL, NIL, NIL]
+        tail = [cats, monies, opt_s(cheque), images_arg(row), s(memo), self._tags(tags), *holding_args(row, sign)]
         if kind == "expense":
             args = [ref("Transaction", transaction_id), ref("Account", account["id"]), s(description),
                     self._payee(payee), currency, rate, original, n(float(value)), s(account["currency"]),
@@ -589,7 +621,7 @@ class Transactions:
         value = amount(changes["amount"], field="amount") if "amount" in changes else abs(Decimal(current["amount"]))
         rate = amount(changes["exchange_rate"], field="exchange_rate") if "exchange_rate" in changes \
             else Decimal(stored(row.get("exchangeRate")) or 1)
-        when = parse_when(changes["date"]) if changes.get("date") else parse_when(current["date"])
+        when = parse_when(changes["date"]) if changes.get("date") else parse_when(row["date"])
         args = [ref("Transaction", row["gid"]), ref("Budget", row["budgetFrom.GID"]), ref("Budget", row["budgetTo.GID"]),
                 s(changes.get("description", current.get("description") or "")),
                 s(changes.get("memo", current.get("memo") or "")), n(float(value)), n(float(rate)),

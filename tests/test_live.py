@@ -18,12 +18,13 @@ from moneywiz_mcp.backups import Backups
 from moneywiz_mcp.budgets import Budgets
 from moneywiz_mcp.catalog import Catalog
 from moneywiz_mcp.investments import Investments
-from moneywiz_mcp.native import MoneyWizError, Native, s
+from moneywiz_mcp.native import NIL, MoneyWizError, Native, date, n, ref, s
 from moneywiz_mcp.portfolio import Portfolio
 from moneywiz_mcp.reports import KINDS as REPORT_KINDS, Reports
 from moneywiz_mcp.scheduled import Scheduled
 from moneywiz_mcp.settings import Settings
-from moneywiz_mcp.transactions import Transactions
+from moneywiz_mcp.transactions import CREATE_EXPENSE, Transactions
+from moneywiz_mcp.values import parse_when
 
 SANDBOX = "MCP-TEST-"
 
@@ -775,6 +776,8 @@ def test_budget_transfers_edits_order_and_warnings(live):
         edited = transactions.update(moved["transfer_id"], amount="15", memo="m")
         assert edited["kind"] == "budget_transfer" and edited["amount"] == "15" and edited["from_budget_id"] == first["id"]
         assert budgets.get(first["id"])["current_period"]["available"] == "85"
+        again = transactions.update(moved["transfer_id"], memo="m2")  # what is not given stays
+        assert again["amount"] == "15" and budgets.get(first["id"])["current_period"]["available"] == "85"
         transactions.delete(moved["transfer_id"])
 
         assert [b["id"] for b in budgets.reorder([second["id"], first["id"]])] == [second["id"], first["id"]]
@@ -1244,6 +1247,9 @@ def test_currency_exchange_in_a_forex_account(live, tmp_path):
         assert edited["transaction"]["id"] == trade["id"] and edited["transaction"]["exchange"]["to_amount"] == "93"
         assert len(edited["transaction"]["attachments"]) == 1
         assert {h["symbol"]: h["shares"] for h in edited["holdings"]}["EUR"] == "93"
+        kept = investments.update_exchange(trade["id"], memo="m2")  # what is not given stays
+        assert kept["transaction"]["exchange"] == edited["transaction"]["exchange"]
+        assert {h["symbol"]: h["shares"] for h in kept["holdings"]} == {h["symbol"]: h["shares"] for h in edited["holdings"]}
         with pytest.raises(MoneyWizError):
             investments.exchange(account=cash["id"], from_currency="USD", from_amount="1", to_currency="EUR",
                                  to_amount="1", date_="2026-11-05")
@@ -1260,3 +1266,109 @@ def test_currency_exchange_in_a_forex_account(live, tmp_path):
             for holding in portfolio.holdings(account["id"]):
                 investments.delete_holding(holding["id"], delete_trades=True)
             accounts.delete(account["id"])
+
+
+def _stored(native, entity, gid, fields):
+    """Fields exactly as stored (tagged dates as seconds), without the row's own keys."""
+    rows = native.query(entity, where=[["GID", "eq", s(gid)]], fields=fields, raw=True)["items"]
+    assert len(rows) == 1
+    return {k: v for k, v in rows[0].items() if k not in ("$ref", "gid")}
+
+
+def test_edits_leave_what_they_are_not_given_alone(live):
+    """An edit hands every value it is not given back exactly as stored. Up to 0.1.7 a rename
+    took the account out of its budgets (deleting a budget left monitoring nothing), turned its
+    online-banking switches off and moved an investment account's cash date to now; a memo edit
+    flipped negative amounts, added a transfer's fee to its amount again, unlinked an expense from
+    its forex position, dropped a foreign amount when the amount changed, and rounded dates to
+    the second and trade figures to 15 digits."""
+    native, accounts, transactions, catalog = live["native"], live["accounts"], live["transactions"], live["catalog"]
+    budgets, investments = Budgets(native), Investments(native)
+    group = live["group"]
+    cash = accounts.create(group_id=group, name=SANDBOX + "KEEP", kind="cash", currency="CNY", opening_balance="500")
+    cash2 = accounts.create(group_id=group, name=SANDBOX + "KEEP2", kind="cash", currency="CNY")
+    usd = accounts.create(group_id=group, name=SANDBOX + "KEEPUSD", kind="cash", currency="USD")
+    card = accounts.create(group_id=group, name=SANDBOX + "KEEPCARD", kind="credit_card", currency="CNY", credit_limit="1000")
+    invest = accounts.create(group_id=group, name=SANDBOX + "KEEPINV", kind="investment", currency="USD",
+                             opening_balance="100", opening_date="2026-11-01")
+    forex = accounts.create(group_id=group, name=SANDBOX + "KEEPFX", kind="forex", currency="CNY")
+    category = catalog.create_category(SANDBOX + "KEEPCAT", "expense")
+    budget = budgets.create(name=SANDBOX + "KEEP", amount_="100", categories=[category["id"]],
+                            accounts=[cash["id"], card["id"]], currency="CNY")
+    sole = budgets.create(name=SANDBOX + "KEEPSOLE", amount_="100", categories=[category["id"]], accounts=[cash2["id"]],
+                          currency="CNY")
+    try:
+        # Accounts.
+        settings = ["autoCategorizeOBTransactions", "autoCreateNewOBCategories", "autoDetectOBTransactionsPayees",
+                    "autoCreateNewOBPayees", "onlineBankBalanceFetchMode", "balanceDisplayMode", "infoDisplayMode",
+                    "cashAsOfDate", "openingBalance", "creditLimit", "statementEndDay", "includeInNetworth", "info"]
+        assert _stored(native, "Account", card["id"], ["infoDisplayMode"])["infoDisplayMode"] == 0, "as the app's own cards"
+        for account in (cash, cash2, card, invest, forex):
+            before = _stored(native, "Account", account["id"], settings)
+            accounts.update(account["id"], name=account["name"] + "-RENAMED")
+            assert _stored(native, "Account", account["id"], settings) == before, account["name"]
+        assert {a["id"] for a in budgets.get(budget["id"])["accounts"]} == {cash["id"], card["id"]}
+        assert budgets.get(sole["id"])["accounts"] == [{"id": cash2["id"], "name": SANDBOX + "KEEP2-RENAMED"}]
+        changed = accounts.update(card["id"], note="n", credit_limit="2000")
+        assert changed["note"] == "n" and changed["credit_limit"] == "2000"
+
+        # Transactions: a memo edit changes nothing else, on either leg.
+        fields = ["amount", "fee", "originalAmount", "originalCurrency", "originalExchangeRate", "originalFee", "date",
+                  "categoriesAssigments.amount", "symbol", "numberOfShares", "investmentHolding.GID", "status"]
+
+        def memo_keeps(transaction_id):
+            ids = [transaction_id] + [x for x in [transactions.get(transaction_id).get("other_leg_id")] if x]
+            before = [_stored(native, "Transaction", x, fields) for x in ids]
+            transactions.update(transaction_id, memo=SANDBOX + "memo")
+            assert [_stored(native, "Transaction", x, fields) for x in ids] == before
+            return transactions.get(transaction_id)
+
+        purchase = transactions.create(account=cash["id"], kind="expense", amount_="30", date_="2026-11-09",
+                                       description=SANDBOX + "purchase")
+        cases = [dict(kind="income", amount_="-5"), dict(kind="expense", amount_="-5"),
+                 dict(kind="refund", amount_="-5", refund_of=purchase["id"]),
+                 dict(kind="expense", amount_="20", fee="1", categories=category["id"]),
+                 dict(kind="income", amount_="20", fee="1"),
+                 dict(kind="transfer", amount_="20", fee="1", transfer_to=cash2["id"], categories=category["id"]),
+                 dict(kind="transfer", amount_="70", fee="1", transfer_to=usd["id"], transfer_amount="10"),
+                 dict(kind="expense", amount_="72", original_amount="10", original_currency="USD"),
+                 dict(kind="expense", amount_="3", date_="2026-11-10T10:00:00.25+08:00")]
+        made = {}
+        for number, case in enumerate(cases):
+            case = {"date_": "2026-11-10", **case}
+            made[number] = memo_keeps(transactions.create(account=cash["id"], description=SANDBOX + f"keep{number}",
+                                                          **case)["id"])
+        assert made[0]["amount"] == "-5" and made[2]["amount"] == "-5"
+        assert made[5]["amount"] == "-21" and transactions.get(made[5]["other_leg_id"])["amount"] == "20"
+        # A new amount keeps the foreign amount and gives the rate.
+        rated = transactions.update(made[7]["id"], amount="80")
+        assert rated["original"] == {"currency": "USD", "amount": "-10", "exchange_rate": "8"}
+
+        # An expense booked against a forex position stays booked against it.
+        transactions.adjust_balance(account=forex["id"], balance="100", currency="USD", date_="2026-11-01")
+        args = [ref("Account", forex["id"]), NIL, s(SANDBOX + "fxspend"), NIL, s("CNY"), n(35.0), n(1.0), n(35.0),
+                n(0.0), date(parse_when("2026-11-10")), NIL, NIL, NIL, NIL, s(""), NIL, NIL, s("USD"), n(5.0)]
+        spent = native.invoke("manager", CREATE_EXPENSE, args)["value"]["gid"]
+        position = [["investmentAccount.GID", "eq", s(forex["id"])], ["symbol", "eq", s("USD")]]
+        assert native.query("InvestmentHolding", where=position, fields=["numberOfShares"])["items"][0]["numberOfShares"] == 95
+        memo_keeps(spent)
+        assert native.query("InvestmentHolding", where=position, fields=["numberOfShares"])["items"][0]["numberOfShares"] == 95
+
+        # A trade's figures stay exact through a description edit.
+        bought = investments.trade(account=invest["id"], side="buy", symbol="MCPTESTK", shares="3.141592653589793",
+                                   price="10.123456789012345", commission="-0.123456789", date_="2026-11-05")
+        trade = ["numberOfShares", "pricePerShare", "fee", "amount", "date"]
+        before = _stored(native, "Transaction", bought["transaction"]["id"], trade)
+        investments.update_trade(bought["transaction"]["id"], description=SANDBOX + "renamed")
+        assert _stored(native, "Transaction", bought["transaction"]["id"], trade) == before
+        assert native.status()["context"]["pending"] == 0
+    finally:
+        drop_budgets(native)
+        for account in (cash, cash2, usd, card, invest, forex):
+            for row in _transactions_of(native, account["id"]):
+                if native.get("Transaction", row["gid"]):
+                    transactions.delete(row["gid"])
+            for holding in live["portfolio"].holdings(account["id"]):
+                investments.delete_holding(holding["id"], delete_trades=True)
+            accounts.delete(account["id"])
+        catalog.delete("Category", category["id"])

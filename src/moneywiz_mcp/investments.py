@@ -8,7 +8,7 @@ from __future__ import annotations
 from .accounts import Accounts
 from .native import Native, MoneyWizError, s, d, b, i, ref, arr, date, opt_s, NIL, currency_code
 from .portfolio import Portfolio, HOLDING_FIELDS, holding_view
-from .transactions import Transactions, images_arg
+from .transactions import Transactions, given, images_arg
 from .values import amount, day_start, parse_when, show_date
 
 BUY = ("buyInvestmentsShares:transactionGID:desc:assetClass:holdingType:cusip:date:sharesSymbol:numberOfShares:"
@@ -161,13 +161,15 @@ class Investments:
             # MoneyWiz moves buys and sells only between accounts of their kind (moveTransactions:toAccount:).
             raise MoneyWizError(f"A trade in a {source['kind']} account can only move to another {source['kind']} account")
         symbol = _symbol(changes.get("symbol", current.get("symbol")))
-        quantity = amount(changes.get("shares", current.get("shares")), field="shares")
-        unit = amount(changes.get("price", current.get("price_per_share")), field="price")
-        fee = amount(changes.get("commission", current.get("fee") or 0), field="commission")
-        when = parse_when(changes["date"]) if changes.get("date") else parse_when(current["date"])
+        row = self.transactions._row(transaction_id)
+        # Unchanged figures go back as stored (MoneyWiz keeps a trade's shares, price and
+        # commission as given), not as the rounded figures the view shows.
+        quantity = amount(changes["shares"], field="shares") if "shares" in changes else given(row.get("numberOfShares"), 1)
+        unit = amount(changes["price"], field="price") if "price" in changes else given(row.get("pricePerShare"), 1)
+        fee = amount(changes["commission"], field="commission") if "commission" in changes else given(row.get("fee"), 1)
+        when = parse_when(changes["date"]) if changes.get("date") else parse_when(row["date"])
         # A trade moving to an account that does not hold the symbol yet keeps its holding's type.
         holding = self._holding_of(account["id"], symbol) or self._holding_of(source["id"], symbol) or {}
-        row = self.transactions._row(transaction_id)
         # With another account or symbol, MoneyWiz deletes the trade (and its stored
         # attachment files) and records it again, keeping a split's flag; the edit
         # returns the trade as it now is. Its attachments travel as copies.
@@ -280,7 +282,7 @@ class Investments:
         result = self.n.invoke("manager", EDIT_EXCHANGE,
                                [ref("Transaction", transaction_id), ref("Account", current["account_id"]),
                                 s(changes.get("description", current.get("description") or "")), NIL, NIL, NIL,
-                                date(parse_when(changes.get("date") or current["date"])), s(source), s(target),
+                                date(parse_when(changes.get("date") or row["date"])), s(source), s(target),
                                 d(float(amount(changes.get("from_amount", was["from_amount"]), field="from_amount"))),
                                 d(float(amount(changes.get("to_amount", was["to_amount"]), field="to_amount"))),
                                 d(float(amount(changes.get("fee", was.get("fee") or "0"), field="fee"))), s(fee_code),

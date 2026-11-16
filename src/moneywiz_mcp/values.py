@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date as Date, datetime, time
+from datetime import date as Date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN
 
 from .native import MoneyWizError
@@ -63,8 +63,18 @@ def money(value) -> str | None:
     return text
 
 
-def local_tz():
-    return datetime.now().astimezone().tzinfo
+# Local time. Every conversion goes through the system time zone for that very
+# moment (a naive datetime's astimezone()), never a fixed offset: an offset
+# taken today is an hour off for dates on the other side of a daylight-saving
+# change, which put day starts on the previous day.
+
+def local_time(day: Date, at: time = time(0, 0)) -> datetime:
+    """A wall-clock time on a calendar day in the local zone, with that day's offset."""
+    return datetime.combine(day, at).astimezone()
+
+
+def today() -> Date:
+    return datetime.now().astimezone().date()
 
 
 def parse_when(value: str, *, field: str = "date") -> datetime:
@@ -73,17 +83,26 @@ def parse_when(value: str, *, field: str = "date") -> datetime:
         raise MoneyWizError(f"{field}: expected YYYY-MM-DD or ISO 8601 datetime")
     try:
         if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
-            return datetime.combine(Date.fromisoformat(value), time(12, 0), tzinfo=local_tz())
+            return local_time(Date.fromisoformat(value), time(12, 0))
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise MoneyWizError(f"{field}: expected YYYY-MM-DD or ISO 8601 datetime, got {value!r}") from exc
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=local_tz())
+    return parsed if parsed.tzinfo else parsed.astimezone()
+
+
+def local_day(value: str, *, field: str = "date") -> Date:
+    """The local calendar day a date or timestamp falls on."""
+    return parse_when(value, field=field).astimezone().date()
 
 
 def day_start(value: str, *, field: str = "date") -> datetime:
     """The local start of a day, as MoneyWiz's editors pass dates (timelessDateFromDate:)."""
-    moment = parse_when(value, field=field).astimezone(local_tz())
-    return datetime.combine(moment.date(), time(0, 0), tzinfo=local_tz())
+    return local_time(local_day(value, field=field))
+
+
+def next_day_start(value: str, *, field: str = "date") -> datetime:
+    """The local start of the following day: an exclusive end, as MoneyWiz stores one."""
+    return local_time(local_day(value, field=field) + timedelta(days=1))
 
 
 def parse_bound(value: str | None, *, end: bool = False, field: str = "date") -> datetime | None:
@@ -91,12 +110,7 @@ def parse_bound(value: str | None, *, end: bool = False, field: str = "date") ->
     if value is None:
         return None
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value or ""):
-        day = Date.fromisoformat(value)
-        start = datetime.combine(day, time(0, 0), tzinfo=local_tz())
-        if end:
-            from datetime import timedelta
-            start += timedelta(days=1)
-        return start
+        return next_day_start(value, field=field) if end else day_start(value, field=field)
     return parse_when(value, field=field)
 
 
@@ -104,7 +118,14 @@ def show_date(value: str | None) -> str | None:
     """Agent dates arrive as UTC ISO strings; present them in local time."""
     if value is None:
         return None
-    return datetime.fromisoformat(value).astimezone(local_tz()).isoformat(timespec="seconds")
+    return datetime.fromisoformat(value).astimezone().isoformat(timespec="seconds")
+
+
+def show_seconds(value) -> str | None:
+    """An undecoded agent date ({"$date": unix seconds}) in local time."""
+    if not isinstance(value, dict) or "$date" not in value:
+        return None
+    return datetime.fromtimestamp(value["$date"]).astimezone().isoformat(timespec="seconds")
 
 
 def flag(value) -> bool | None:

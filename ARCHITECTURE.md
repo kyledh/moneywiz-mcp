@@ -94,13 +94,38 @@
 12. **Ship only what works.** A business call that cannot be completed reliably
    (for example share exchanges, see STATUS.md) is left out rather than exposed
    with caveats or kept as unused machinery.
+13. **An edit hands back what it was not given, as stored.** MoneyWiz's edit
+   methods set everything they take: `setBudgets:toAccount:` makes exactly
+   the budgets given monitor the account (nil takes it out of every budget,
+   and a budget left monitoring nothing is deleted), the online-banking
+   switches and the cash date are set from the arguments, and the
+   symbol and share count relink an expense or income to a forex position or
+   holding. So unchanged values are never rebuilt from what a tool shows
+   (rounded, signs folded, settings it does not show); they are read from
+   the stored row and given back the way MoneyWiz's editors give them: an
+   expense's amount and shares negated, an income's or refund's as stored
+   (a negative income stays negative), a transfer's amount sent from its
+   original amount (its stored amount includes the fee). Each kind's edit has
+   a live test that a memo-only edit leaves every stored value as it was.
+14. **Send a call once.** A connection that ended between calls is replaced
+   before the next one is sent. One lost while MoneyWiz handles a call (it
+   quit or crashed) is reported as such: MoneyWiz may have carried the call
+   out and saved it, so sending it again could record it twice or crash the
+   app a second time. Inside the agent, what a write left unsaved is saved
+   before its result is read, so a failure reading the result can neither
+   lose the write nor leave it pending.
+15. **Reads are questions, writes are calls.** `Native.ask` calls a method
+   that only answers (a validator, a computed figure): it runs while the app
+   holds unsaved changes, saves nothing and mutes nothing, and the agent
+   refuses the answer if the method left anything unsaved, rolling that back
+   when nothing else was pending. `Native.invoke` is for writes only.
 
 ## Layers
 
 | Layer | Responsibility |
 | --- | --- |
 | `agent/src/agent.js` | Domain-free: fetch requests, predicates, key-path reads, typed invocation, context state, save. |
-| `native.py` | One Frida session per process, lazy attach, re-attach after an app restart, typed-argument helpers, `$date`/`$dec`/`$int` decoding, signature lookup. |
+| `native.py` | One Frida session per process, lazy attach, re-attach on the next call after an app restart (a call is sent once), writes (`invoke`) and questions (`ask`), typed-argument helpers, `$date`/`$dec`/`$int` decoding, signature lookup. |
 | `values.py` | Amount, date and output formatting shared by all domains. |
 | `accounts.py`, `transactions.py`, `catalog.py`, `settings.py`, `investments.py`, `portfolio.py`, `scheduled.py`, `budgets.py`, `reports.py` | Business rules per domain: which selector, in which order, with which guards. |
 | `lifecycle.py` | A MoneyWiz the server launched: kept out of the Dock, handed to the user when seen in use, quit when idle or when the last server exits; the lease shared by several servers. |
@@ -122,7 +147,10 @@ nothing about Frida. Adding a domain means adding one Python module.
   `{"b"/"i"/"d": …}` for primitive parameters. Trade shares, prices and
   commissions are primitive doubles in MoneyWiz's signatures.
 * A bare `YYYY-MM-DD` becomes local noon, which keeps the calendar day stable
-  across timezones. Range ends are exclusive.
+  across timezones. Range ends are exclusive. Every local time is converted
+  with the system zone's offset for that moment, never one fixed offset: an
+  offset taken today is an hour off on the other side of a daylight-saving
+  change, which put day starts on the previous day (0.1.7 and earlier).
 * Scheduled transactions use NSCalendarUnit values for `durationUnits`, as
   MoneyWiz's repeat editor offers them: `16 = day`, `8192 = week`, `8 = month`,
   `4 = year`; the manager stores a week as 7 days. Weekend handling, the

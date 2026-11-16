@@ -184,7 +184,8 @@ def moneywiz_update_account(
     include_in_networth: bool | None = None, auto_clear_transactions: bool | None = None,
     low_balance_alert: str | None = None,
 ) -> dict:
-    """Change an account's settings. Currency and kind cannot be changed."""
+    """Change an account's settings; every setting not given is kept, including the budgets that monitor it.
+    Currency and kind cannot be changed."""
     resolved = accounts.resolve(account)
     changes = {k: v for k, v in dict(name=name, note=note, opening_balance=opening_balance,
                                      credit_limit=credit_limit, statement_end_day=statement_end_day,

@@ -11,13 +11,13 @@ the report editor's labels (CreateCustomReportViewController).
 """
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime
 
 from .accounts import Accounts
 from .budgets import Budgets
 from .catalog import Catalog
 from .native import Native, MoneyWizError, s, i, b, ni, ref, arr, date, NIL, USER, prev, recorded_encoding
-from .values import clean, local_tz, money, parse_when, show_date
+from .values import clean, day_start, local_time, money, next_day_start, parse_when, show_date, show_seconds, today
 
 # Report kinds the server creates, by MoneyWiz's typed creator.
 _TIME = "reportTimePeriod:fromDate:toDate:includeScheduledTransactions:"
@@ -162,7 +162,7 @@ def view(row: dict) -> dict:
 def _value(v):
     """One result value: dates in local time, amounts formatted like the other tools."""
     if isinstance(v, dict) and "$date" in v:
-        return show_date(datetime.fromtimestamp(v["$date"], timezone.utc).isoformat())
+        return show_seconds(v)
     if isinstance(v, dict) and "$dec" in v:
         return money(float(v["$dec"]))
     if isinstance(v, bool) or v is None or isinstance(v, str):
@@ -369,7 +369,7 @@ class Reports:
         return clean(out)
 
     def groups(self) -> list[dict]:
-        listed = self.n.invoke("manager", "getCustomReportsGroups", [], save=False)["value"] or []
+        listed = self.n.ask("manager", "getCustomReportsGroups", []) or []
         ids = [g["gid"] for g in listed if isinstance(g, dict) and g.get("gid")]
         rows = [self.n.get("Group", gid, GROUP_FIELDS) for gid in ids]
         members = {}
@@ -428,15 +428,11 @@ class Reports:
         if period == "custom":
             if not from_date or not to_date:
                 raise MoneyWizError("A custom period needs from_date and to_date")
-            start = datetime.combine(parse_when(from_date, field="from_date").astimezone(local_tz()).date(), time(0),
-                                     tzinfo=local_tz())
-            end = datetime.combine(parse_when(to_date, field="to_date").astimezone(local_tz()).date(), time(0),
-                                   tzinfo=local_tz()) + timedelta(days=1)
+            start, end = day_start(from_date, field="from_date"), next_day_start(to_date, field="to_date")
         else:
             # MoneyWiz works the dates out from the period; these only fill the arguments.
-            today = datetime.now(local_tz()).date()
-            start = datetime.combine(today.replace(day=1), time(0), tzinfo=local_tz())
-            end = datetime.combine(today, time(0), tzinfo=local_tz()) + timedelta(days=1)
+            start = local_time(today().replace(day=1))
+            end = next_day_start(today().isoformat())
         scheduled = (kind == "forecast") if include_scheduled is None else bool(include_scheduled)
 
         def account_refs():
@@ -492,7 +488,7 @@ class Reports:
             "reportTimePeriod": lambda: i(period_value),
             "fromDate": lambda: date(start),
             "toDate": lambda: date(end),
-            "asOfDate": lambda: date(parse_when(as_of, field="as_of") if as_of else datetime.now(local_tz())),
+            "asOfDate": lambda: date(parse_when(as_of, field="as_of") if as_of else datetime.now().astimezone()),
             "includeScheduledTransactions": lambda: b(scheduled),
             "includeArchivedAccounts": lambda: b(include_archived),
         }

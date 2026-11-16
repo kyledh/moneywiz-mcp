@@ -1,12 +1,15 @@
 """Persistent in-process connection to the running MoneyWiz app.
 
 One Frida session per MCP process, attached lazily on first use and
-re-attached automatically if MoneyWiz restarts. All app work runs on
-MoneyWiz's main queue inside the agent; this module only transports
+re-attached on the next call if MoneyWiz restarted in between. A call is sent
+once: if the connection is lost while MoneyWiz handles it, the call may or may
+not have been carried out, so it is reported, never sent again. All app work
+runs on MoneyWiz's main queue inside the agent; this module only transports
 JSON and converts the agent's tagged values.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import subprocess
 import threading
@@ -29,7 +32,6 @@ _RECORDED = json.loads(Path(__file__).with_name("signatures.json").read_text())
 RECORDED_BUILD = _RECORDED["build"]
 MANAGER_SIGNATURES: dict[str, str] = _RECORDED["MoneyWizManager"]
 CLASS_SIGNATURES: dict[str, dict[str, str]] = _RECORDED["classes"]
-SIGNATURES = MANAGER_SIGNATURES
 # How long a write waits for MoneyWiz's own unsaved objects to clear.
 UNSAVED_WAIT = 5.0
 # How long the first call waits for a MoneyWiz it launched to open its ledger.
@@ -93,8 +95,16 @@ class Native:
                 "Cannot attach to MoneyWiz: macOS denied task_for_pid. Run "
                 "`sudo security authorizationdb write system.privilege.taskport is-developer` once "
                 "(see README, 'Attach permission')") from exc
-        script = session.create_script(AGENT.read_text(), name="moneywiz-mcp")
-        script.load()
+        except (frida.ProcessNotFoundError, frida.TransportError) as exc:
+            raise MoneyWizError(f"Cannot attach to MoneyWiz ({exc}); retry once it has started") from None
+        try:
+            script = session.create_script(AGENT.read_text(), name="moneywiz-mcp")
+            script.load()
+        except (frida.InvalidOperationError, frida.TransportError) as exc:
+            # A session without its agent would only hold MoneyWiz up when it quits.
+            with contextlib.suppress(frida.InvalidOperationError, frida.TransportError):
+                session.detach()
+            raise MoneyWizError(f"Could not load the agent into MoneyWiz ({exc}); retry in a moment") from None
         # Runs on Frida's own thread, so it must not take our lock: a detach
         # started from here would then deadlock against the caller holding it.
         session.on("detached", self._mark_stale)
@@ -116,6 +126,9 @@ class Native:
                         f"MoneyWiz was started but its ledger is not open after {STARTUP_WAIT:g}s "
                         f"({exc.args[0] if exc.args else exc}); if it asks for a passcode, unlock it and retry"
                     ) from None
+            except (frida.InvalidOperationError, frida.TransportError):
+                self._drop()
+                raise MoneyWizError("MoneyWiz quit while it was starting; retry") from None
             time.sleep(1)
 
     def _mark_stale(self, *_):
@@ -140,23 +153,26 @@ class Native:
         with self._lock:
             if launch and self.lifecycle is not None:
                 self.lifecycle.used()
-            for attempt in (1, 2):
-                if self._stale:
-                    self._drop()
-                if self._script is None:
-                    self._connect(launch)
-                try:
-                    return getattr(self._script.exports_sync, name)(*args)
-                except frida.InvalidOperationError:
-                    # Script/session destroyed (app quit or restarted): reconnect once.
-                    self._drop()
-                    if attempt == 2:
-                        raise MoneyWizError("Lost connection to MoneyWiz") from None
-                except frida.core.RPCException as exc:
-                    error = MoneyWizError(exc.args[0] if exc.args else str(exc))
-                    error.kind = exc.args[1] if len(exc.args) > 1 else "Error"
-                    error.detail = str(exc)
-                    raise error from None
+            # A connection that ended between calls (MoneyWiz quit or restarted) is
+            # replaced before anything is sent.
+            if self._script is not None and (self._stale or self._script.is_destroyed):
+                self._drop()
+            if self._script is None:
+                self._connect(launch)
+            try:
+                return getattr(self._script.exports_sync, name)(*args)
+            except (frida.InvalidOperationError, frida.TransportError):
+                # Lost while MoneyWiz had the call: it may have run (and saved) it, so
+                # sending it again could record it twice, or crash MoneyWiz twice.
+                self._drop()
+                raise MoneyWizError(
+                    "The connection to MoneyWiz was lost during the call (MoneyWiz quit or crashed). "
+                    "It may or may not have been carried out: check before repeating it") from None
+            except frida.core.RPCException as exc:
+                error = MoneyWizError(exc.args[0] if exc.args else str(exc))
+                error.kind = exc.args[1] if len(exc.args) > 1 else "Error"
+                error.detail = str(exc)
+                raise error from None
 
     def peek(self, name: str, *args):
         """A call for the lifecycle check: never launches MoneyWiz and does not
@@ -212,21 +228,27 @@ class Native:
         return items[0] if items else None
 
     def invoke(self, target, selector: str, args: list, *, encoding: str | None = None,
-               fields=None, save: bool = True, quiet=()) -> dict:
-        """Call a business method. quiet names [class, selector] handlers that
-        only present UI, to be skipped while this call runs (see agent.js)."""
-        spec = {"target": target, "selector": selector, "args": args, "fields": fields or [], "save": save}
-        if save:
-            quiet = tuple(quiet) + ALWAYS_QUIET
-        if quiet:
-            spec["quiet"] = [list(handler) for handler in quiet]
-        if encoding is None:
-            encoding = recorded_encoding(target, selector)
-        if encoding:
-            spec["encoding"] = encoding
+               fields=None, quiet=()) -> dict:
+        """Call a business method that changes the ledger, and save what it left
+        unsaved. Refused (after a short wait) while MoneyWiz holds unsaved changes
+        of its own, which a save would commit too. quiet names [class, selector]
+        handlers that only present UI, to be skipped while this call runs (see
+        agent.js); the budget warning alert is skipped for every write."""
+        spec = {"target": target, "selector": selector, "args": args, "fields": fields or [], "save": True,
+                "quiet": [list(handler) for handler in (*quiet, *ALWAYS_QUIET)],
+                "encoding": encoding or recorded_encoding(target, selector)}
         result = decode(self._write("invoke", spec))
         self.notices.extend(result.pop("notices", None) or [])
         return result
+
+    def ask(self, target, selector: str, args: list) -> Any:
+        """Call a method that only answers a question (a validator, a computed value,
+        a list MoneyWiz keeps) and return its value. Works while MoneyWiz holds
+        unsaved changes, since nothing is saved; the agent refuses the answer, and
+        undoes what it can, if the method left anything unsaved (see agent.js)."""
+        spec = {"target": target, "selector": selector, "args": args, "fields": [], "save": False,
+                "read_only": True, "encoding": recorded_encoding(target, selector)}
+        return decode(self._call("invoke", spec))["value"]
 
     def batch(self, specs: list[dict]) -> dict:
         """Several calls in one main-queue turn, for business objects that take
@@ -375,7 +397,7 @@ def currency_code(native: "Native", code) -> str:
     if not isinstance(code, str):
         raise MoneyWizError("currency: a code such as USD is required")
     code = code.strip().upper()
-    known = native.invoke("manager", "currenciesArray", [], save=False)["value"] or []
+    known = native.ask("manager", "currenciesArray", []) or []
     if isinstance(known, list) and known and code not in known:
         raise MoneyWizError(f"MoneyWiz does not know the currency {code}")
     return code

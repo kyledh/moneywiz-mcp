@@ -68,7 +68,7 @@ class Catalog:
         selector = ("validateCategoryNameCaseSensitive:parentCategory:categoryType:" if case_sensitive
                     else "validateCategoryName:parentCategory:categoryType:")
         parent = ref("Category", parent_id) if parent_id else NIL
-        ok = self.n.invoke(cls("DataValidatorHelper"), selector, [s(name), parent, i(type_raw)], save=False)["value"]
+        ok = self.n.ask(cls("DataValidatorHelper"), selector, [s(name), parent, i(type_raw)])
         if not ok:
             raise MoneyWizError(f"MoneyWiz rejected category name {name!r} (duplicate under the same parent?)")
 
@@ -99,10 +99,11 @@ class Catalog:
             self.category(new_parent)
             # A cycle would leave the category tree without a root for these.
             cats = {c["id"]: c for c in self.categories()}
-            cursor = new_parent
-            while cursor:
+            cursor, seen = new_parent, set()
+            while cursor in cats and cursor not in seen:  # stops at a root, a missing parent or a loop already stored
                 if cursor == category_id:
                     raise MoneyWizError("A category cannot be moved under itself or its descendants")
+                seen.add(cursor)
                 cursor = cats[cursor].get("parent_id")
         if new_name != current["name"] or new_parent != current.get("parent_id"):
             same_name_case = new_name.lower() == current["name"].lower() and new_parent == current.get("parent_id")
