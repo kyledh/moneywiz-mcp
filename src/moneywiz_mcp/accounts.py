@@ -255,12 +255,29 @@ class Accounts:
         return {"deleted": account_id, "name": current["name"], "deleted_transactions": count}
 
     def move(self, account_id: str, *, group_id: int | None = ..., display_order: int | None = None) -> dict:
+        """Move an account to a position and/or another group.
+
+        display_order is the position among the target group's active accounts.
+        MoneyWiz's updateAccount:withDisplayOrder:andGroup: only counts active
+        siblings (its filter block is `!archived`) and renumbers them 0..n, as a
+        drag in the app does: the target group's, and on a group change also
+        those of the group the account leaves. Archived accounts keep their values.
+        """
         current = self.get(account_id)
         target_group = current.get("group_id") if group_id is ... else group_id
+        changing_group = target_group != current.get("group_id")
+        if display_order is None:
+            if not changing_group:
+                raise MoneyWizError("Give display_order (position among the group's active accounts) or another group")
+            # Append after the target group's active accounts, as unarchiving does,
+            # instead of carrying over the position it had in the old group.
+            display_order = self.n.count("Account", [["groupID", "eq", ni(NO_GROUP if target_group is None else target_group)],
+                                                     ["archived", "ne", nb(True)], ["GID", "ne", s(account_id)]])
+        if not isinstance(display_order, int) or display_order < 0:
+            raise MoneyWizError("display_order must be a non-negative integer")
         group = ref("Group", self.group(target_group)["id"]) if target_group is not None else NIL
-        order = current.get("display_order") if display_order is None else display_order
         self.n.invoke("manager", "updateAccount:withDisplayOrder:andGroup:",
-                      [ref("Account", account_id), ni(order), group])
+                      [ref("Account", account_id), ni(display_order), group])
         return self.get(account_id)
 
     # ------------------------------------------------------------ groups

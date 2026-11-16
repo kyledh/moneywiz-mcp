@@ -18,7 +18,7 @@ function need(condition, message) { if (!condition) fail(message); }
 function onMain(work) {
   return new Promise((resolve, reject) => {
     ObjC.schedule(ObjC.mainQueue, () => {
-      try { resolve(work()); } catch (e) { const err = new Error(e && e.message ? e.message : String(e)); err.stack = e && e.stack; reject(err); }
+      try { resolve(work()); } catch (e) { const err = new Error(e && e.message ? e.message : String(e)); err.name = (e && e.name) || 'Error'; err.stack = e && e.stack; reject(err); }
     });
   });
 }
@@ -398,6 +398,23 @@ function contextState(e, detail = false) {
   return out;
 }
 
+// A business method saves the whole context, so writing while the app holds
+// its own unsaved objects would commit those too. Some are short-lived: after
+// data changes, MWPortfolioStoryModel inserts a CustomReport to compute the
+// portfolio overview and deletes it about a second later. The error is named
+// so the caller can wait for that and retry; nothing has been called yet.
+function requireClean(e, state) {
+  if (state.pending === 0) return;
+  const detail = contextState(e, true).detail, parts = [];
+  for (const [kind, groups] of Object.entries(detail))
+    for (const [name, entry] of Object.entries(groups))
+      if (kind !== 'updated' || entry.keys.length) parts.push(`${kind} ${name} x${entry.count}`);
+  const hint = detail.inserted.CustomReport ? 'a report MoneyWiz is still calculating' : 'an editor may be open in MoneyWiz';
+  const error = new Error(`MoneyWiz has unsaved changes: ${parts.join(', ')} (${hint})`);
+  error.name = 'UnsavedChanges';
+  throw error;
+}
+
 function save(e) {
   const before = contextState(e);
   if (before.pending === 0) return { saved: false, before, after: before };
@@ -446,8 +463,7 @@ rpc.exports = {
     return onMain(() => {
       const e = env();
       const before = contextState(e);
-      need(spec.allow_dirty || before.pending === 0,
-        'MoneyWiz has unsaved changes (an editor may be open); finish or cancel it first');
+      if (!spec.allow_dirty) requireClean(e, before);
       const value = invokeOn(e, spec);
       const after = contextState(e);
       const out = { value, context_before: before, context_after: after };
@@ -460,7 +476,7 @@ rpc.exports = {
   batch(specs) {
     return onMain(() => {
       const e = env();
-      need(contextState(e).pending === 0, 'MoneyWiz has unsaved changes; finish or cancel the open editor first');
+      requireClean(e, contextState(e));
       const results = [];
       for (const spec of specs) {
         if (spec.query) {

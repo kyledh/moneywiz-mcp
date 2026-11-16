@@ -38,6 +38,9 @@ starting values (`tests/test_live.py`).
 * **Reconcile transactions**: `createReconcileTransactionForAccount:…`.
 * **Attachments**: counts are reported; adding or reading receipt files is not.
 * **Saved reports, info cards, file import.**
+* Archiving is checked by hand, not by the live suite: MoneyWiz moves an
+  archived account to "no group" and renumbers the user's real ungrouped
+  accounts, which the suite must not touch.
 * Reconcile and budget-transfer transactions are read-only; `update_transaction`
   refuses them with a clear message. Investment buys and sells are edited with
   `update_trade`.
@@ -51,7 +54,9 @@ iCloud sync stay with MoneyWiz.
 * MoneyWiz must be running with its ledger open. The server attaches to the
   live process and reconnects if the app restarts.
 * Attaching needs the one-time permission setup in the README.
-* A write is refused while MoneyWiz has its own unsaved edits.
+* A write waits up to 5 seconds for MoneyWiz's own unsaved changes to clear
+  (it briefly holds a temporary report after every data change) and is
+  refused if they remain, for example while an editor is open.
 * Saved locally is not synced; MoneyWiz uploads to iCloud on its own schedule.
 * Several calls are not atomic: each business call saves independently.
 * Only build 466's `MoneyWizManager` signatures are recorded. On another build,

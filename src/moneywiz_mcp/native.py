@@ -24,6 +24,8 @@ AGENT = Path(__file__).with_name("agent.js")
 # Calls on the manager are checked against these, so an app update that
 # changes a signature fails loudly instead of passing misaligned arguments.
 SIGNATURES = json.loads(Path(__file__).with_name("signatures.json").read_text())
+# How long a write waits for MoneyWiz's own unsaved objects to clear.
+UNSAVED_WAIT = 5.0
 
 
 class MoneyWizError(RuntimeError):
@@ -106,9 +108,27 @@ class Native:
                     if attempt == 2:
                         raise MoneyWizError("Lost connection to MoneyWiz") from None
                 except frida.core.RPCException as exc:
-                    error = MoneyWizError(str(exc).splitlines()[0].removeprefix("Error: "))
+                    error = MoneyWizError(exc.args[0] if exc.args else str(exc))
+                    error.kind = exc.args[1] if len(exc.args) > 1 else "Error"
                     error.detail = str(exc)
                     raise error from None
+
+    def _write(self, name: str, *args):
+        # The agent refuses before calling anything while MoneyWiz holds unsaved
+        # objects. Its own background work clears within about a second (the
+        # portfolio overview's temporary report), so wait for that; an editor
+        # left open is still dirty after the wait and is reported.
+        deadline = time.monotonic() + UNSAVED_WAIT
+        while True:
+            try:
+                return self._call(name, *args)
+            except MoneyWizError as exc:
+                if getattr(exc, "kind", None) != "UnsavedChanges":
+                    raise
+                if time.monotonic() >= deadline:
+                    raise MoneyWizError(f"{exc}, still pending after {UNSAVED_WAIT:g}s; "
+                                        "finish or cancel it in MoneyWiz, then retry") from None
+            time.sleep(0.2)
 
     # ---------------------------------------------------------------- api
 
@@ -142,7 +162,7 @@ class Native:
                 raise MoneyWizError(f"Unknown MoneyWizManager selector {selector}")
         if encoding:
             spec["encoding"] = encoding
-        return decode(self._call("invoke", spec))
+        return decode(self._write("invoke", spec))
 
     def save(self) -> dict:
         return self._call("save")
