@@ -20,6 +20,7 @@ starting values (`tests/test_live.py`).
 | Currencies | yes | default currency, manual rates, display list | manual rate set/clear; net worth and conversions computed by MoneyWiz |
 | Investments | holdings, shares, price, cost basis | buy, sell, edit trade, delete trade, create/delete holding, manual price, share count, cost basis | buy → second buy → edit → sell → delete, with shares, cost basis and cash checked at each step |
 | Loans | accounts, payment plan, full installment schedule | — | reads |
+| Saved reports | name, kind, period, breakdown, chart, filters, group; figures as MoneyWiz computes them (rows, totals, series, statistics, transactions per row) | 22 report kinds: create (saved), rename, move, reorder, delete; report groups: create, update membership, reorder, delete | every kind created and saved with nothing left unsaved, a custom period, group membership, a rename that keeps its place, a group deleted with its reports kept; figures of every kind computed with nothing left pending; category, cashflow, statistics, balance and table figures checked against sandbox data; a forecast and a net worth over the whole ledger leave every schedule and loan installment as it was |
 | Budgets | definition, current period's budgeted, available, spent and remaining, monitored accounts, categories and tags | expense and income budgets, repeating or one-time: create, update (amount for chosen periods, rollover, tags, name, period, monitored items), delete; budget groups: create, update membership, delete; transfers between budgets | monthly budget through spending past its limit, a raise for the current and future periods, rollover, tag filter added and removed, rename; one-time budget; group membership; a transfer, its edit and deletion; reordering; real budgets keep their order; MoneyWiz's "exceeded" verdict returned by the tool |
 | Scheduled transactions | definition, next due date, repeat rule, app-computed upcoming dates, completion | expense, income, transfer: create, update, delete, skip, execute (with an amount override) | monthly bill with category, tags and payee: edit → execute → skip → execute a different amount → new rule; weekly series of 3 with weekend handling to completion; last-weekday-of-month rule; transfer with both legs; one-off |
 
@@ -32,7 +33,12 @@ starting values (`tests/test_live.py`).
   also need the agent to keep a reference to a non-managed object across calls.
 * **Loan creation and payment-plan edits**: `createLoanAccountForUser:…` takes 28
   arguments including a generated payment plan.
-* **Saved reports, info cards, file import.**
+* **Info cards, file import, unsaved reports.** Info cards (the summary
+  cards of investment accounts and the dashboard) are display settings.
+  `get_report_data` reads saved reports only; figures no saved report gives
+  come from the ledger tools. `createSpreadSheetReportForUser:…` (the
+  transactions table report) returns nothing on build 466 and is not
+  offered.
 * Archiving is checked by hand, not by the live suite: MoneyWiz moves an
   archived account to "no group" and renumbers the user's real ungrouped
   accounts, which the suite must not touch.
@@ -60,8 +66,18 @@ iCloud sync stay with MoneyWiz.
 
 ## Known constraints
 
-* MoneyWiz must be running with its ledger open. The server attaches to the
-  live process and reconnects if the app restarts.
+* The server works through a running MoneyWiz. It starts one hidden when none
+  is running, keeps it out of the Dock while nobody looks at it, and quits it
+  after 10 idle minutes or when the last server using it exits (README,
+  "MoneyWiz in the background"). Verified on build 466: launched hidden, the
+  first call answered in about 2 s, out of the Dock a second later; quit after
+  the idle time and on both ways a client ends a session (input closed,
+  SIGTERM); shown without being activated, it was back in the Dock within 3 s
+  and was not quit afterwards; no crash reports. While a Frida session is
+  attached, MoneyWiz takes about 30 s longer to exit, so the server detaches
+  as soon as MoneyWiz agrees to quit. Another client's session (an older
+  server) can still hold up the exit that long. Servers before 0.1.6 do not
+  take part: they neither keep a MoneyWiz alive nor quit one.
 * Attaching needs the one-time permission setup in the README.
 * A write waits up to 5 seconds for MoneyWiz's own unsaved changes to clear
   (it briefly holds a temporary report after every data change) and is
@@ -96,11 +112,19 @@ iCloud sync stay with MoneyWiz.
 * MoneyWiz's edit methods set a transaction's attachments to exactly the list
   they are given, so every edit passes the current ones. Up to 0.1.4 edits
   passed none, which would have removed them.
+* A report's figures are computed in a child context that is discarded,
+  as MoneyWiz does when it shows a report (see ARCHITECTURE). For a report
+  that counts scheduled transactions (a forecast does by default), MoneyWiz
+  records their future occurrences for every account, whichever accounts the
+  report covers; on a large ledger that takes a few seconds. The net worth
+  report has no account filter in MoneyWiz and always covers every account.
 * Saved locally is not synced; MoneyWiz uploads to iCloud on its own schedule.
 * Several calls are not atomic: each business call saves independently.
-* Only build 466's `MoneyWizManager` signatures are recorded. On another build,
-  any call whose signature changed fails with an explicit error; reads and
-  unchanged methods keep working.
+* Signatures are recorded from build 466. On another build, any call whose
+  signature changed fails with an explicit error; reads and unchanged methods
+  keep working. `scripts/check_build.py` lists, before anything fails, every
+  method, muted observer and field the server uses that the running build has
+  changed (see the README).
 
 ## Silence
 
@@ -124,5 +148,7 @@ count of due bills) after scheduled-transaction changes, as it does for edits
 in the app. `set_default_currency` was not exercised, to leave the ledger's
 currency alone. `adjust_balance` was checked by its live test and a look at
 what MoneyWiz presents afterwards, not under the full tracer (running that
-tracer next to other attached clients is what crashed the app once). With
-`MONEYWIZ_LAUNCH=1` the app is started hidden (`open -g -j`).
+tracer next to other attached clients is what crashed the app once). The
+app is started hidden (`open -g -j`) and moved out of the Dock with the
+standard activation policy; it is quit through `-[NSApplication terminate:]`,
+the path Cmd-Q takes.

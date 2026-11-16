@@ -20,12 +20,20 @@ import frida
 PROCESS_NAME = "MoneyWiz"
 APP_PATH = "/Applications/MoneyWiz.app"
 AGENT = Path(__file__).with_name("agent.js")
-# MoneyWizManager instance-method type encodings recorded from build 466.
-# Calls on the manager are checked against these, so an app update that
-# changes a signature fails loudly instead of passing misaligned arguments.
-SIGNATURES = json.loads(Path(__file__).with_name("signatures.json").read_text())
+# Type encodings recorded from one MoneyWiz build: every MoneyWizManager
+# instance method, plus the other methods and observers the server calls.
+# Every call is checked against these, so an app update that changes a
+# signature fails loudly instead of passing misaligned arguments.
+# scripts/check_build.py compares a new build with this table.
+_RECORDED = json.loads(Path(__file__).with_name("signatures.json").read_text())
+RECORDED_BUILD = _RECORDED["build"]
+MANAGER_SIGNATURES: dict[str, str] = _RECORDED["MoneyWizManager"]
+CLASS_SIGNATURES: dict[str, dict[str, str]] = _RECORDED["classes"]
+SIGNATURES = MANAGER_SIGNATURES
 # How long a write waits for MoneyWiz's own unsaved objects to clear.
 UNSAVED_WAIT = 5.0
+# How long the first call waits for a MoneyWiz it launched to open its ledger.
+STARTUP_WAIT = 60.0
 # Main-window observers that only put up an alert, skipped for every saving
 # call: any transaction change can push a budget over, and MoneyWiz answers
 # with a "the following budgets are low / exceeded" alert.
@@ -44,6 +52,8 @@ class Native:
         self._pid = None
         self._stale = False
         self._launch = launch
+        # A Lifecycle (lifecycle.py) when the server looks after MoneyWiz itself.
+        self.lifecycle = None
         # What muted observers were told during calls (see agent.js), so a tool
         # can report it; read with take_notices().
         self.notices: list[dict] = []
@@ -57,16 +67,23 @@ class Native:
                 return process.pid
         return None
 
-    def _connect(self):
+    def running_pid(self) -> int | None:
+        return self._find_pid()
+
+    def _connect(self, launch: bool = True):
         pid = self._find_pid()
-        if pid is None and self._launch:
+        launched = False
+        if pid is None and self._launch and launch:
             # -g: do not bring it to the front; -j: launch it hidden, so an MCP
             # call does not put MoneyWiz's window on screen.
             subprocess.run(["open", "-g", "-j", "-a", APP_PATH], check=False)
             for _ in range(60):
                 time.sleep(1)
                 if (pid := self._find_pid()) is not None:
+                    launched = True
                     break
+            if launched and self.lifecycle is not None:
+                self.lifecycle.launched(pid)
         if pid is None:
             raise MoneyWizError("MoneyWiz is not running; open it (with its database unlocked) and retry")
         try:
@@ -83,6 +100,23 @@ class Native:
         session.on("detached", self._mark_stale)
         self._stale = False
         self._session, self._script, self._pid = session, script, pid
+        if launched:
+            self._wait_until_ready()
+
+    def _wait_until_ready(self):
+        """A MoneyWiz just launched takes a few seconds to open its ledger."""
+        deadline = time.monotonic() + STARTUP_WAIT
+        while True:
+            try:
+                self._script.exports_sync.status()
+                return
+            except frida.core.RPCException as exc:
+                if time.monotonic() >= deadline:
+                    raise MoneyWizError(
+                        f"MoneyWiz was started but its ledger is not open after {STARTUP_WAIT:g}s "
+                        f"({exc.args[0] if exc.args else exc}); if it asks for a passcode, unlock it and retry"
+                    ) from None
+            time.sleep(1)
 
     def _mark_stale(self, *_):
         self._stale = True
@@ -102,13 +136,15 @@ class Native:
             except (frida.InvalidOperationError, frida.TransportError):
                 pass
 
-    def _call(self, name: str, *args):
+    def _call(self, name: str, *args, launch: bool = True):
         with self._lock:
+            if launch and self.lifecycle is not None:
+                self.lifecycle.used()
             for attempt in (1, 2):
                 if self._stale:
                     self._drop()
                 if self._script is None:
-                    self._connect()
+                    self._connect(launch)
                 try:
                     return getattr(self._script.exports_sync, name)(*args)
                 except frida.InvalidOperationError:
@@ -121,6 +157,16 @@ class Native:
                     error.kind = exc.args[1] if len(exc.args) > 1 else "Error"
                     error.detail = str(exc)
                     raise error from None
+
+    def peek(self, name: str, *args):
+        """A call for the lifecycle check: never launches MoneyWiz and does not
+        count as use. None when MoneyWiz is not running or refuses."""
+        if self._find_pid() is None:
+            return None
+        try:
+            return self._call(name, *args, launch=False)
+        except (MoneyWizError, frida.InvalidOperationError, frida.TransportError):
+            return None
 
     def _write(self, name: str, *args):
         # The agent refuses before calling anything while MoneyWiz holds unsaved
@@ -174,13 +220,32 @@ class Native:
             quiet = tuple(quiet) + ALWAYS_QUIET
         if quiet:
             spec["quiet"] = [list(handler) for handler in quiet]
-        if encoding is None and target == "manager":
-            encoding = SIGNATURES.get(selector)
-            if encoding is None:
-                raise MoneyWizError(f"Unknown MoneyWizManager selector {selector}")
+        if encoding is None:
+            encoding = recorded_encoding(target, selector)
         if encoding:
             spec["encoding"] = encoding
         result = decode(self._write("invoke", spec))
+        self.notices.extend(result.pop("notices", None) or [])
+        return result
+
+    def batch(self, specs: list[dict]) -> dict:
+        """Several calls in one main-queue turn, for business objects that take
+        two calls (see agent.js batch). Each spec is {"target", "selector",
+        "args", "save"?, "quiet"?}; a later spec can pass prev(i), the object
+        the i-th earlier call returned. If one fails, what the batch inserted is
+        deleted again."""
+        prepared = []
+        for spec in specs:
+            spec = dict(spec)
+            spec.setdefault("args", [])
+            spec.setdefault("fields", [])
+            if spec.get("encoding") is None:
+                spec["encoding"] = recorded_encoding(spec["target"], spec["selector"])
+            quiet = tuple(spec.pop("quiet", ())) + (ALWAYS_QUIET if spec.get("save") else ())
+            if quiet:
+                spec["quiet"] = [list(handler) for handler in quiet]
+            prepared.append(spec)
+        result = decode(self._write("batch", prepared))
         self.notices.extend(result.pop("notices", None) or [])
         return result
 
@@ -212,8 +277,58 @@ class Native:
     def attachment(self, transaction_id: str, index: int) -> dict:
         return self._call("attachment", transaction_id, index)
 
+    def report_data(self, spec: dict, calls: dict[str, list[str]]) -> dict:
+        """Compute a saved report in a forked child context (see the agent's reportData).
+        Returns the agent's tagged values ($date, $dec, $ref) undecoded."""
+        return self._call("reportData", {**spec, "calls": recorded_calls(calls)})
+
+    # Introspection for scripts/check_build.py (read-only).
+    def live_signatures(self, pairs: list[tuple[str, str]]) -> list[str | None]:
+        return self._call("signatures", [list(p) for p in pairs])
+
+    def has_ivar(self, class_name: str, name: str) -> bool:
+        return self._call("hasIvar", class_name, name)
+
+    def model(self) -> dict:
+        return self._call("model")
+
     def methods(self, class_name: str, needle: str = "") -> list:
         return self._call("methods", class_name, needle)
+
+
+def recorded_encoding(target, selector: str) -> str:
+    """The recorded type encoding for a call, keyed as the code names the
+    receiver: the manager, the user, an entity for ref(), a class for cls()."""
+    if target == "manager":
+        name, key, table = "MoneyWizManager", selector, MANAGER_SIGNATURES
+    else:
+        if target == "user":
+            name, key = "User", "- " + selector
+        elif isinstance(target, dict) and "cls" in target:
+            name, key = target["cls"], "+ " + selector
+        elif isinstance(target, dict) and "ref" in target:
+            name, key = target["ref"][0], "- " + selector
+        else:
+            raise MoneyWizError(f"Unknown invocation target {target!r}")
+        table = CLASS_SIGNATURES.get(name, {})
+    found = table.get(key)
+    if found is None:
+        raise MoneyWizError(f"No build-{RECORDED_BUILD} signature recorded for {name} {key}")
+    return found
+
+
+def recorded_calls(calls: dict[str, list[str]]) -> list[list[str]]:
+    """[class, "- selector", encoding] for methods the agent calls itself,
+    listed by class as a module's AGENT_CALLS."""
+    out = []
+    for name, keys in calls.items():
+        for key in keys:
+            table = MANAGER_SIGNATURES if name == "MoneyWizManager" else CLASS_SIGNATURES.get(name, {})
+            found = table.get(key[2:] if name == "MoneyWizManager" else key)
+            if found is None:
+                raise MoneyWizError(f"No build-{RECORDED_BUILD} signature recorded for {name} {key}")
+            out.append([name, key, found])
+    return out
 
 
 # -------------------------------------------------------------------- typed args
@@ -232,6 +347,11 @@ def b(value: bool) -> dict: return {"b": bool(value)}
 def i(value: int) -> dict: return {"i": int(value)}
 def d(value: float) -> dict: return {"d": float(value)}
 def cls(name: str) -> dict: return {"cls": name}
+
+def prev(index: int) -> dict:
+    """In a batch: the object returned by an earlier call (see Native.batch)."""
+    return {"prev": int(index)}
+
 
 NIL = {"nil": True}
 USER = {"user": True}

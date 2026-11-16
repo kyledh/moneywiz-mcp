@@ -85,21 +85,36 @@ GUI apps may not see your shell's `PATH`; if the command is not found, use the
 absolute path from `which moneywiz-mcp` or `which uvx`.
 
 Then ask the client to call `moneywiz_status`: it reports the app version, the
-open database and ledger totals. If MoneyWiz is not running you get a clear
-error; open the app and retry. The server reconnects by itself after MoneyWiz
+open database and ledger totals. The server reconnects by itself after MoneyWiz
 restarts.
 
-To let the server open MoneyWiz when it is not running, set
-`MONEYWIZ_LAUNCH=1` (`claude mcp add --scope user -e MONEYWIZ_LAUNCH=1 moneywiz
--- moneywiz-mcp`, or `"env": {"MONEYWIZ_LAUNCH": "1"}` in a JSON config).
-MoneyWiz is then launched hidden: no window appears and focus stays where it
-is (click its Dock icon to show it). The first call waits for the ledger and
-returns in a few seconds. A MoneyWiz you already have open is left as it is,
-and a ledger behind a passcode still has to be unlocked by hand.
+### MoneyWiz in the background
+
+You do not need to open MoneyWiz first. When it is not running, the server
+starts it hidden: no window appears, focus stays where it is, and once the
+ledger is open (a few seconds; the first call waits for it) MoneyWiz is kept
+out of the Dock and Cmd-Tab. The server then looks after that MoneyWiz:
+
+* It quits it, as Cmd-Q would, after 10 minutes in which no MCP client used it,
+  or when the last server using it exits (the client session ends).
+* It quits only when nothing holds MoneyWiz: no unsaved changes and no iCloud
+  sync in progress (MoneyWiz's own record of its CloudKit work).
+* Opening MoneyWiz yourself (from the Dock, Finder or Spotlight) shows the same
+  app; within a few seconds it is back in the Dock and it is yours: the server
+  never hides or quits it again. A MoneyWiz you started yourself is never
+  hidden or quit.
+
+Several clients (say hermes and Claude) share this through a small file,
+`~/Library/Caches/moneywiz-mcp/lifecycle.json`. Settings, as environment
+variables of the server (`claude mcp add --scope user -e
+MONEYWIZ_IDLE_MINUTES=30 moneywiz -- moneywiz-mcp`, or `"env": {...}` in a JSON
+config): `MONEYWIZ_IDLE_MINUTES` (default 10; `0` never quits) and
+`MONEYWIZ_LAUNCH=0` (never start MoneyWiz; calls then fail until you open it).
+A ledger behind a passcode still has to be unlocked by hand.
 
 ## Tools
 
-71 tools, all prefixed `moneywiz_`:
+82 tools, all prefixed `moneywiz_`:
 
 | Area | Tools |
 | --- | --- |
@@ -112,6 +127,7 @@ and a ledger behind a passcode still has to be unlocked by hand.
 | Investments | `list_holdings`, `trade`, `update_trade`, `delete_trade`, `create_holding`, `delete_holding`, `set_holding_price`, `set_holding_shares`, `set_holding_cost_basis` |
 | Loans | `list_loans`, `loan_schedule` |
 | Scheduled transactions | `list_scheduled`, `create_scheduled`, `update_scheduled`, `delete_scheduled`, `skip_scheduled`, `execute_scheduled` |
+| Saved reports | `list_reports`, `get_report_data`, `create_report`, `update_report`, `reorder_reports`, `delete_report`, `list_report_groups`, `create_report_group`, `update_report_group`, `delete_report_group`, `reorder_report_groups` |
 | Budgets | `list_budgets`, `create_budget`, `update_budget`, `delete_budget`, `transfer_between_budgets`, `list_budget_groups`, `create_budget_group`, `update_budget_group`, `delete_budget_group`, `reorder_budgets`, `reorder_budget_groups` |
 
 What is and is not covered yet is listed in [STATUS.md](STATUS.md).
@@ -157,6 +173,19 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
   syncs it through iCloud. `get_transaction` lists them and `get_attachment`
   writes one to a file. Edits keep them, and deleting the transaction deletes
   them.
+* **Saved reports** (`create_report`) are reports in MoneyWiz's Reports
+  section, made as its report editor makes them: balance over time, forecast,
+  net worth, cashflow, statistics, budget balance and comparison, categories,
+  payees and tags (totals, over time, drill-down), profit and loss, summary
+  breakdowns and the tables of categories, payees and tags over time or by
+  one another. MoneyWiz computes and shows them; a period such as
+  `this_month` stays relative. `get_report_data` returns a saved report's
+  figures as MoneyWiz computes them when the report is opened: its rows
+  (with nested rows for tables and drill-downs, and MoneyWiz's own total and
+  average rows), totals, chart series over time, statistics, and optionally
+  each row's transactions. MoneyWiz computes on a temporary copy that it
+  discards, so reading a report writes nothing. For figures no saved report
+  gives, read the transactions.
 * **Balance adjustments** (`adjust_balance`) are MoneyWiz's "adjust balance":
   give the balance a statement shows on a date and MoneyWiz books the
   difference from its own running balance as a reconcile transaction. A bare
@@ -248,6 +277,22 @@ The live suite writes to the real ledger: it creates everything under an
 `MCP-TEST-` prefix, removes it again (also after failures), and asserts that
 account, transaction, category, payee and tag counts, and the positions of your
 accounts, groups and categories, end where they started.
+
+### After a MoneyWiz update
+
+The server records the type encoding of every MoneyWiz method it calls, for
+one build, and refuses a call whose signature has changed. With the new build
+running:
+
+```sh
+uv run scripts/check_build.py             # what changed for the server, if anything
+uv run scripts/check_build.py --record    # nothing changed: record the new build
+MONEYWIZ_LIVE_TESTS=1 uv run pytest -q tests/test_live.py
+```
+
+The report lists every method, muted observer and Core Data field the server
+uses that the new build changed or removed. `--record` refuses while there are
+such changes. Adapt the calls first, then pass `--accept-changed`.
 
 The compiled agent is checked in at `src/moneywiz_mcp/agent.js`. After editing
 `agent/src/agent.js`, rebuild it:

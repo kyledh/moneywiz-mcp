@@ -111,15 +111,14 @@ class Budgets:
 
     def _period(self, budget_id: str, index: int) -> dict:
         """The amounts of one period, as MoneyWiz computes them."""
-        def call(selector, encoding):
-            return self.n.invoke(ref("Budget", budget_id), selector, [{"i": index}], encoding=encoding,
-                                 save=False)["value"]
+        def call(selector):
+            return self.n.invoke(ref("Budget", budget_id), selector, [{"i": index}], save=False)["value"]
         return clean({
             "number": index,
-            "budgeted": money(call("openingBalanceForPeriodIndex:", "@24@0:8Q16")),
-            "available": money(call("balanceWithTransfersForPeriodIndex:", "@24@0:8q16")),
-            "spent": money(call("budgetExpensesForPeriodIndex:", "@24@0:8Q16")),
-            "remaining": money(call("remainingAmountForPeriodIndex:", "@24@0:8q16")),
+            "budgeted": money(call("openingBalanceForPeriodIndex:")),
+            "available": money(call("balanceWithTransfersForPeriodIndex:")),
+            "spent": money(call("budgetExpensesForPeriodIndex:")),
+            "remaining": money(call("remainingAmountForPeriodIndex:")),
         })
 
     def _rows(self, where=None) -> list[dict]:
@@ -171,7 +170,7 @@ class Budgets:
         # MoneyWiz's own rule for budget names (DataValidatorHelper).
         if not isinstance(name, str):
             raise MoneyWizError("name: text required")
-        ok = self.n.invoke(cls("DataValidatorHelper"), "validateBudgetName:", [s(name)], encoding="B24@0:8@16",
+        ok = self.n.invoke(cls("DataValidatorHelper"), "validateBudgetName:", [s(name)],
                            save=False)["value"]
         if not ok:
             raise MoneyWizError(f"MoneyWiz rejects the budget name {name!r}")
@@ -183,14 +182,13 @@ class Budgets:
             tags = [tags]
         known = {t["id"]: t["name"] for t in self.catalog.tags()}
         names = [known.get(t, t) for t in tags]
-        predicate = self.n.invoke(cls("TagsPredicate"), "ORPredicateStringFromTagsNames:", [arr(s(x) for x in names)],
-                                  encoding="@24@0:8@16", save=False)["value"]
+        predicate = self.n.invoke(cls("TagsPredicate"), "ORPredicateStringFromTagsNames:", [arr(s(x) for x in names)], save=False)["value"]
         return s(predicate) if predicate else NIL
 
     def _accounts(self, accounts) -> dict:
         if accounts is None:
             # The editor's default: every non-investment account.
-            rows = self.n.invoke("user", "nonInvestmentAccountsArray", [], encoding="@16@0:8", save=False)["value"] or []
+            rows = self.n.invoke("user", "nonInvestmentAccountsArray", [], save=False)["value"] or []
             return arr(ref("Account", r["gid"]) for r in rows)
         return arr(ref("Account", self.accounts.resolve(a)["id"]) for a in accounts)
 
@@ -215,7 +213,7 @@ class Budgets:
         return every, units
 
     def _limit_reached(self) -> bool:
-        return bool(self.n.invoke("manager", "isBudgetsLimitReached", [], encoding="B16@0:8", save=False)["value"])
+        return bool(self.n.invoke("manager", "isBudgetsLimitReached", [], save=False)["value"])
 
     # ------------------------------------------------------------ writes
 
@@ -312,8 +310,7 @@ class Budgets:
             else:
                 # The current period's own amount, applied to it alone, changes nothing.
                 index = row.get("currentPeriodNumber") or 0
-                stored_amount = self.n.invoke(ref("Budget", budget_id), "openingBalanceForPeriodIndex:", [{"i": index}],
-                                              encoding="@24@0:8Q16", save=False)["value"]
+                stored_amount = self.n.invoke(ref("Budget", budget_id), "openingBalanceForPeriodIndex:", [{"i": index}], save=False)["value"]
                 value, mask = float(stored_amount or 0), PERIODS["current"]
             rollover = bool(changes.get("rollover", row.get("isPeriodMoneyTransferEnabled")))
             # The editor passes its rollover switch for both transfer flags when editing.

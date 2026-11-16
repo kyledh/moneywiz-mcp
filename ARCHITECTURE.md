@@ -7,11 +7,17 @@
    offsets, fixed addresses or binary hash checks, so an app update only breaks
    what actually changed.
 2. **Check the type encoding before every call.**
-   `src/moneywiz_mcp/signatures.json` holds the recorded build-466 encodings of
-   the `MoneyWizManager` instance methods. `native.invoke` attaches the expected
-   encoding and the agent compares it with the live method, then checks each
-   argument's tag against the encoded parameter type. A changed signature fails
-   loudly instead of pushing misaligned arguments onto the stack.
+   `src/moneywiz_mcp/signatures.json` holds the encodings recorded from one
+   build: every `MoneyWizManager` instance method, and under `classes` every
+   other method the server calls and every observer it mutes, keyed as the
+   code names the receiver (an entity for `ref()`, a class for `cls()`).
+   `native.invoke` looks the expected encoding up for every call (none is
+   written in the domain code) and the agent compares it with the live method,
+   then checks each argument's tag against the encoded parameter type. A
+   changed signature fails loudly instead of pushing misaligned arguments onto
+   the stack. `calls.py` finds every call in the source; an offline test fails
+   if one is not in the table, and `scripts/check_build.py` compares the table,
+   and the fields the server reads, with a running build.
 3. **Validate what a call needs before touching the app.** An uncaught
    Objective-C exception inside MoneyWiz terminates it, and the injection layer
    cannot catch one. So key paths are walked through the Core Data model,
@@ -34,6 +40,8 @@
    manager when none exists.
 6. **One queue.** The user's managed object context is
    `NSMainQueueConcurrencyType`, so all work is scheduled on the main queue.
+   The one exception is a report's calculation, which runs where MoneyWiz runs
+   it: on a child context's private queue (below).
 7. **Call business methods, not setters.** `createWithdrawTransactionForAccount:…`
    recalculates balances, updates budget links, creates missing payees and
    saves. Writing `amount` directly would leave the ledger inconsistent.
@@ -73,7 +81,17 @@
    app's own calls are untouched. Nothing stays patched between calls: a
    persistent code patch (as in 0.1.1–0.1.2) crashed MoneyWiz when two
    clients were attached and unloaded in the wrong order.
-11. **Ship only what works.** A business call that cannot be completed reliably
+11. **Look after only the MoneyWiz the server started.** `lifecycle.py` hides
+   (accessory activation policy) and later quits a MoneyWiz only when the
+   lease file says a server launched that very process and nobody has taken it
+   over. Being seen in use (a window shown or miniaturized, the app active or
+   unhidden) hands it to the user for good. Quitting goes through the app's
+   own `terminate:` and is refused while anything is unsaved or MoneyWiz
+   reports CloudKit work. The check runs on a thread every 3 s, never launches
+   MoneyWiz and does not count as use. The agent schedules `terminate:` with a
+   run-loop timer, not a JavaScript callback, so the server can detach before
+   it fires: nothing of the agent's runs once it is gone.
+12. **Ship only what works.** A business call that cannot be completed reliably
    (for example share exchanges, see STATUS.md) is left out rather than exposed
    with caveats or kept as unused machinery.
 
@@ -84,7 +102,8 @@
 | `agent/src/agent.js` | Domain-free: fetch requests, predicates, key-path reads, typed invocation, context state, save. |
 | `native.py` | One Frida session per process, lazy attach, re-attach after an app restart, typed-argument helpers, `$date`/`$dec`/`$int` decoding, signature lookup. |
 | `values.py` | Amount, date and output formatting shared by all domains. |
-| `accounts.py`, `transactions.py`, `catalog.py`, `settings.py`, `investments.py`, `portfolio.py`, `scheduled.py`, `budgets.py` | Business rules per domain: which selector, in which order, with which guards. |
+| `accounts.py`, `transactions.py`, `catalog.py`, `settings.py`, `investments.py`, `portfolio.py`, `scheduled.py`, `budgets.py`, `reports.py` | Business rules per domain: which selector, in which order, with which guards. |
+| `lifecycle.py` | A MoneyWiz the server launched: kept out of the Dock, handed to the user when seen in use, quit when idle or when the last server exits; the lease shared by several servers. |
 | `server.py` | MCP tool surface, argument descriptions, read/write annotations. |
 
 The agent knows nothing about accounts or transactions; the domain modules know
@@ -123,6 +142,31 @@ nothing about Frida. Adding a domain means adding one Python module.
   joined by OR. A repeating budget's amount for an edit applies to a bitmask
   of periods: 4 past, 2 current, 1 future. Scheduled transactions also report
   the upcoming dates MoneyWiz computes (`-nextExecuteDateWithNum:`).
+* Some business objects take two calls: a report is created unsaved by a
+  typed creator, then kept with `saveCustomReport:withName:groupID:`.
+  `Native.batch` runs both in one main-queue turn, the second naming the
+  first's result as `prev(0)`, and if a step fails it deletes what the batch
+  inserted, so nothing half-made is left for MoneyWiz's next save. Report
+  enums were read from MoneyWiz's own label methods and tables, not guessed:
+  calling such a helper with a value past its table crashed MoneyWiz once.
+* Report figures are computed the way MoneyWiz computes a report it shows
+  (`-[MoneyWizManager calculateDataForReportAsync:delegate:]`): the agent
+  forks a child of the main context (`forkToChildManagedObjectContext`),
+  turns off saving, sync tracking and notifications on that forked manager,
+  builds a temporary copy of the saved report there with the 15-argument
+  `createReportForUser:…calculateData:YES…`, reads the results on the child's
+  queue and resets the child context. The calculation writes scratch state
+  into whatever context its report lives in: every account's balance display
+  mode and, for a forecast over accounts with fees, investments or
+  cross-currency transfers, the future occurrences of every scheduled
+  transaction (inserted transactions, advanced schedules, loan installments
+  marked paid, category links removed). Run on a report in the main context
+  it would leave all of that pending for the next save, so it never runs
+  there. The objects a block uses on the other queue are retained explicitly
+  (Frida's wrappers do not retain; a freed forked manager crashed MoneyWiz
+  once), and the methods the agent calls itself are listed in the module's
+  `AGENT_CALLS` and checked against the recorded signatures before it starts.
+  Results are read by field lists the Python side names, as for queries.
 * Attachments travel as bytes: MoneyWiz is sandboxed and cannot open the
   caller's files, so the agent writes them into MoneyWiz's own temporary
   directory for `addImagesAtPaths:toTransaction:` and removes them after. It
