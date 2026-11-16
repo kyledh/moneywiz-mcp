@@ -6,6 +6,7 @@ prefix and removed again, including on failure.
 """
 from __future__ import annotations
 
+import json
 import os
 import struct
 import zlib
@@ -260,7 +261,7 @@ def test_deleting_a_used_category_payee_or_tag_unlinks_it(live):
                                    payee=SANDBOX + "PAYEE", tags=[SANDBOX + "TAG"])
         payee = next(p for p in catalog.payees(SANDBOX) if p["name"] == SANDBOX + "PAYEE")
         tag = next(x for x in catalog.tags() if x["name"] == SANDBOX + "TAG")
-        assert catalog.delete("Category", parent["id"])["was_used_by"] == {"childCategories": 1}
+        assert catalog.delete("Category", parent["id"])["was_used_by"] == {"subcategories": 1}
         assert catalog.delete("Payee", payee["id"])["was_used_by"] == {"transactions": 1}
         assert catalog.delete("Tag", tag["id"])["was_used_by"] == {"transactions": 1}
         assert live["native"].get("Category", child["id"]) is None
@@ -621,7 +622,7 @@ def test_budget_lifecycle(live):
                               start_date="2026-11-01")
         assert food["kind"] == "expense" and food["repeat"] == {"every": 1, "unit": "month"}
         assert food["current_period"]["budgeted"] == "100" and food["current_period"]["spent"] == "0"
-        assert [a["id"] for a in food["accounts"]] == [account["id"]]
+        assert food["accounts"] == [account["name"]] and food["categories"] == [category["path"]]
         transactions.create(account=account["id"], kind="expense", amount_="30", date_="2026-11-10",
                             categories=category["id"], description=SANDBOX + "lunch")
         # Going over the limit raises MoneyWiz's budget warning; the server skips that alert.
@@ -786,9 +787,9 @@ def test_budget_transfers_edits_order_and_warnings(live):
         # Through the tool: MoneyWiz's own "exceeded" verdict comes back instead of an alert.
         from moneywiz_mcp import server
         try:
-            result = server.moneywiz_create_transaction(account=account["id"], kind="expense", amount="150",
-                                                        date="2026-11-16", categories=category["id"],
-                                                        description=SANDBOX + "big")
+            result = json.loads(server.moneywiz_create_transaction(account=account["id"], kind="expense", amount="150",
+                                                                   date="2026-11-16", categories=category["id"],
+                                                                   description=SANDBOX + "big").text)
         finally:
             server.native.close()
         assert {b["id"] for b in result["budget_warnings"]["exceeded"]} == {first["id"], second["id"]}
@@ -1307,8 +1308,8 @@ def test_edits_leave_what_they_are_not_given_alone(live):
             before = _stored(native, "Account", account["id"], settings)
             accounts.update(account["id"], name=account["name"] + "-RENAMED")
             assert _stored(native, "Account", account["id"], settings) == before, account["name"]
-        assert {a["id"] for a in budgets.get(budget["id"])["accounts"]} == {cash["id"], card["id"]}
-        assert budgets.get(sole["id"])["accounts"] == [{"id": cash2["id"], "name": SANDBOX + "KEEP2-RENAMED"}]
+        assert set(budgets.get(budget["id"])["accounts"]) == {SANDBOX + "KEEP-RENAMED", SANDBOX + "KEEPCARD-RENAMED"}
+        assert budgets.get(sole["id"])["accounts"] == [SANDBOX + "KEEP2-RENAMED"]
         changed = accounts.update(card["id"], note="n", credit_limit="2000")
         assert changed["note"] == "n" and changed["credit_limit"] == "2000"
 
@@ -1372,3 +1373,120 @@ def test_edits_leave_what_they_are_not_given_alone(live):
                 investments.delete_holding(holding["id"], delete_trades=True)
             accounts.delete(account["id"])
         catalog.delete("Category", category["id"])
+
+
+def test_the_merged_tools_through_the_mcp_layer(live):
+    """The tools as a client calls them: one compact JSON text, merged tools dispatching to MoneyWiz."""
+    import asyncio
+    from moneywiz_mcp import server
+    native, accounts, transactions, catalog = live["native"], live["accounts"], live["transactions"], live["catalog"]
+
+    def call(tool_name, **args):
+        result = asyncio.run(server.mcp._tool_manager.call_tool(tool_name, args, convert_result=True))
+        content = result[0] if isinstance(result, tuple) else result
+        assert len(content) == 1
+        return json.loads(content[0].text)
+
+    account = accounts.create(group_id=live["group"], name=SANDBOX + "TOOLS", kind="cash", currency="CNY",
+                              opening_balance="100")
+    broker = accounts.create(group_id=live["group"], name=SANDBOX + "TOOLSINV", kind="investment", currency="USD",
+                             opening_balance="1000")
+    parent = catalog.create_category(SANDBOX + "TOOLCAT", "expense")
+    first = catalog.create_category(SANDBOX + "A", "expense", parent_id=parent["id"])
+    second = catalog.create_category(SANDBOX + "B", "expense", parent_id=parent["id"])
+    try:
+        status = call("moneywiz_status")
+        assert status["transactions"] == native.count("Transaction") and status["default_currency"]
+
+        # Payees and tags, and what uses them, counted in the lists.
+        payee = call("moneywiz_create_catalog_object", object_type="payee", name=SANDBOX + "PAYEE")
+        tag = call("moneywiz_create_catalog_object", object_type="tag", name=SANDBOX + "TAG")
+        assert call("moneywiz_rename_catalog_object", object_type="tag", object_id=tag["id"],
+                    name=SANDBOX + "TAG2")["name"] == SANDBOX + "TAG2"
+        spent = transactions.create(account=account["id"], kind="expense", amount_="5", date_="2026-11-10",
+                                    payee=payee["name"], tags=[tag["id"]], categories=first["id"],
+                                    description=SANDBOX + "tools")
+        budget = Budgets(native).create(name=SANDBOX + "TOOLB", amount_="10", categories=[first["id"]],
+                                        accounts=[account["id"]], currency="CNY")
+        listed = {c["id"]: c for c in call("moneywiz_list_categories", kind="expense")}
+        assert listed[first["id"]]["transactions"] == 1 and listed[first["id"]]["budgets"] == 1
+        assert listed[second["id"]]["transactions"] == 0 and "budgets" not in listed[second["id"]]
+        assert [p["transactions"] for p in call("moneywiz_list_payees", text=SANDBOX + "PAYEE")] == [1]
+        assert {t["id"]: t["transactions"] for t in call("moneywiz_list_tags")}[tag["id"]] == 1
+
+        # Lists name accounts; single reads keep the ids.
+        rows = call("moneywiz_list_transactions", account=account["id"])["transactions"]
+        assert rows and all("account_id" not in r and r["account"] == SANDBOX + "TOOLS" for r in rows)
+        assert call("moneywiz_get_transaction", transaction_id=spent["id"])["account_id"] == account["id"]
+        mine = [a for a in call("moneywiz_list_accounts") if a["id"] == account["id"]]
+        assert mine == [{"id": account["id"], "name": SANDBOX + "TOOLS", "kind": "cash", "currency": "CNY",
+                         "balance": "95", "group_id": live["group"]}]
+
+        # Groups of each kind.
+        moved = call("moneywiz_create_group", kind="account", name=SANDBOX + "TOOLGRP", currency="CNY")
+        call("moneywiz_update_group", kind="account", group=moved["id"], members=[SANDBOX + "TOOLS"])
+        assert accounts.get(account["id"])["group_id"] == moved["group_id"]
+        # Exactly these members: an account left out would drop to "no group", renumbering real accounts.
+        stay = [a["id"] for a in accounts.list(include_archived=True, group_id=live["group"])]
+        call("moneywiz_update_group", kind="account", group=str(live["group"]), members=stay + [SANDBOX + "TOOLS"])
+        assert accounts.get(account["id"])["group_id"] == live["group"]
+        assert call("moneywiz_delete_group", kind="account", group=SANDBOX + "TOOLGRP")["deleted"] == moved["id"]
+        budget_group = call("moneywiz_create_group", kind="budget", name=SANDBOX + "TOOLBG", members=[budget["id"]])
+        assert [g["budget_ids"] for g in call("moneywiz_list_groups", kind="budget")
+                if g["id"] == budget_group["id"]] == [[budget["id"]]]
+        with pytest.raises(Exception, match="Budget groups have no currency"):
+            call("moneywiz_create_group", kind="budget", name=SANDBOX + "X", currency="CNY")
+        report_group = call("moneywiz_create_group", kind="report", name=SANDBOX + "TOOLRG")
+        assert call("moneywiz_update_group", kind="report", group=report_group["id"],
+                    name=SANDBOX + "TOOLRG2")["name"] == SANDBOX + "TOOLRG2"
+        call("moneywiz_delete_group", kind="report", group=report_group["id"])
+
+        # Display order.
+        order = call("moneywiz_reorder", object_type="category", ordered=[second["id"], first["id"]])
+        assert [c["id"] for c in order] == [second["id"], first["id"]]
+        assert [c["display_order"] for c in order] == [0, 1]
+        with pytest.raises(Exception, match="group applies to budgets and reports"):
+            call("moneywiz_reorder", object_type="category", ordered=[first["id"]], group="x")
+
+        # One holding call for shares, cost basis and price.
+        holding = Investments(native).create_holding(account=broker["id"], symbol="MCPTESTT", shares="10", price="2")
+        updated = call("moneywiz_update_holding", holding_id=holding["id"], shares="12", cost_basis="30", price="2.5",
+                       price_date="2026-11-14")
+        assert (updated["holding"]["shares"], updated["holding"]["cost_basis"]) == ("12", "30")
+        assert updated["holding"]["price_per_share"] == "2.5" and updated["previous"]["shares"] == "10"
+
+        # Status and delete take one id or several; one trade goes through the single delete.
+        bought = Investments(native).trade(account=broker["id"], side="buy", symbol="MCPTESTT", shares="1", price="3",
+                                           date_="2026-11-12")
+        extra = transactions.create(account=account["id"], kind="expense", amount_="1", date_="2026-11-11",
+                                    description=SANDBOX + "tools2")
+        marked = call("moneywiz_set_transaction_status", transaction_ids=[spent["id"], extra["id"]], status="pending")
+        assert {x["status"] for x in marked["transactions"]} == {"pending"}
+        assert call("moneywiz_delete_transactions", transaction_ids=[bought["transaction"]["id"]])["count"] == 1
+        assert {h["symbol"]: h["shares"] for h in live["portfolio"].holdings(broker["id"])}["MCPTESTT"] == "12"
+        assert call("moneywiz_delete_transactions", transaction_ids=[spent["id"], extra["id"]])["count"] == 2
+
+        # A manual rate set and removed through one tool; the rate table ends as it was.
+        rates_before = live["settings"].currencies().get("manual_rates")
+        if not live["settings"].manual_rate("ISK", "NOK")["manual"]:
+            assert call("moneywiz_set_exchange_rate", from_currency="ISK", to_currency="NOK", rate="0.08")["manual"]
+            assert call("moneywiz_set_exchange_rate", from_currency="ISK", to_currency="NOK", rate=None)["manual"] is False
+        assert live["settings"].currencies().get("manual_rates") == rates_before
+    finally:
+        server.native.close()
+        drop_budgets(native)
+        drop_reports(native)
+        for owner in (account, broker):
+            for row in _transactions_of(native, owner["id"]):
+                if native.get("Transaction", row["gid"]):
+                    transactions.delete(row["gid"])
+            for holding in live["portfolio"].holdings(owner["id"]):
+                Investments(native).delete_holding(holding["id"], delete_trades=True)
+            accounts.delete(owner["id"])
+        for group in [g for g in accounts.groups() if g["name"].startswith(SANDBOX + "TOOL")]:
+            accounts.delete_group(group["id"])
+        for entity in ("Payee", "Tag"):
+            for row in native.query(entity, where=[["name", "begins", s(SANDBOX)]], fields=[])["items"]:
+                catalog.delete(entity, row["gid"])
+        for category in (first, second, parent):
+            catalog.delete("Category", category["id"])

@@ -791,9 +791,15 @@ class Transactions:
                 "account": current.get("account")}
 
     def delete_many(self, transaction_ids: list[str]) -> dict:
+        """Delete one or more transactions. One goes through MoneyWiz's delete for a single
+        transaction (as for a trade or an exchange opened in the app), several through its
+        bulk delete (one save), as the transaction list's selection does."""
         current = self._many(transaction_ids)
         removed = list(dict.fromkeys(x for row in current for x in [row["id"], *self._goes_with(row)]))
-        self.n.invoke("manager", DELETE_MANY, [arr(ref("Transaction", row["id"]) for row in current)])
+        if len(current) == 1:
+            self.n.invoke("manager", DELETE, [ref("Transaction", current[0]["id"]), b(True)])
+        else:
+            self.n.invoke("manager", DELETE_MANY, [arr(ref("Transaction", row["id"]) for row in current)])
         left = {r["gid"] for r in self.n.query("Transaction", where=[["GID", "in", arr(s(x) for x in removed)]],
                                                fields=[])["items"]}
         if left:

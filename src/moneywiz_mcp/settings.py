@@ -18,6 +18,9 @@ class Settings:
             raise MoneyWizError("MoneyWiz has no settings object for this user")
         return rows[0]
 
+    def default_currency(self) -> str | None:
+        return self._app_settings().get("defaultCurrency")
+
     def currencies(self) -> dict:
         row = self._app_settings()
         known = self.n.ask("manager", "currenciesArray", []) or []

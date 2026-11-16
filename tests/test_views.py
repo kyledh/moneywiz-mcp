@@ -99,7 +99,8 @@ def test_budget_view_and_tag_filter():
            "iconFileName": "mw2_category_icon_260", "tagsPredicateToMonitor": "%E6%97%85%E8%A1%8C OR trip",
            "accountsLinksToMonitor.account.GID": ["A1"], "accountsLinksToMonitor.account.name": ["Cash"],
            "categoriesAssigmentsToMonitor.category.GID": ["C1"], "categoriesAssigmentsToMonitor.category.name": ["Food"]}
-    view = budget_view(row, {"number": 0, "budgeted": "100", "spent": "120", "remaining": "-20"})
+    view = budget_view(row, {"number": 0, "budgeted": "100", "spent": "120", "remaining": "-20"}, {"C1": "Home/Food"})
+    assert view["accounts"] == ["Cash"] and view["categories"] == ["Home/Food"], "named as the tools take them"
     assert view["kind"] == "expense" and view["repeat"] == {"every": 1, "unit": "month"} and view["rollover"] is True
     assert view["tags"] == ["旅行", "trip"] and view["tags_match"] == "any" and "tag_filter" not in view
     assert view["current_period"]["remaining"] == "-20" and "amount" not in view

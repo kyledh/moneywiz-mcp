@@ -119,6 +119,17 @@
    holds unsaved changes, saves nothing and mutes nothing, and the agent
    refuses the answer if the method left anything unsaved, rolling that back
    when nothing else was pending. `Native.invoke` is for writes only.
+16. **One tool per kind of change, never a read and a write in one.** Tools
+   that do the same change to different objects (groups of accounts, budgets
+   and reports; display order; one transaction or many) are one tool with a
+   kind argument, so a client loads fewer definitions; a read and a write are
+   never merged, because clients ask before writes and warn before deletions
+   from the tools' read-only and destructive markers (an offline test checks
+   them against each tool's verb). A result goes out once, as compact JSON
+   text: FastMCP would send a list as one indented block per item and a
+   structured copy as well, about twice the size. List rows carry what tells
+   their entries apart and how much each is used, so a question takes one
+   call (0.1.x needed one call per category to count its transactions).
 
 ## Layers
 
@@ -129,7 +140,7 @@
 | `values.py` | Amount, date and output formatting shared by all domains. |
 | `accounts.py`, `transactions.py`, `catalog.py`, `settings.py`, `investments.py`, `portfolio.py`, `scheduled.py`, `budgets.py`, `reports.py` | Business rules per domain: which selector, in which order, with which guards. |
 | `lifecycle.py` | A MoneyWiz the server launched: kept out of the Dock, handed to the user when seen in use, quit when idle or when the last server exits; the lease shared by several servers. |
-| `server.py` | MCP tool surface, argument descriptions, read/write annotations. |
+| `server.py` | MCP tool surface, argument descriptions, read/write annotations, compact JSON results, list rows. |
 
 The agent knows nothing about accounts or transactions; the domain modules know
 nothing about Frida. Adding a domain means adding one Python module.

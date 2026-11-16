@@ -72,6 +72,24 @@ class Portfolio:
         return {"holding": after, "requested_price": str(value), "date": show_date(moment.isoformat()) if moment else None,
                 "previous_price": current.get("price_per_share")}
 
+    def update_holding(self, holding_id: str, *, shares=None, cost_basis=None, price=None, when: str | None = None) -> dict:
+        """Set a holding's share count, cost basis and/or manual price (in that order, each with
+        MoneyWiz's own call); returns the holding and what the changed figures were before."""
+        if shares is None and cost_basis is None and price is None:
+            raise MoneyWizError("Give shares, cost_basis or price")
+        if when is not None and price is None:
+            raise MoneyWizError("price_date goes with a price")
+        before = self.holding(holding_id)
+        if shares is not None:
+            self.set_holding_shares(holding_id, shares)
+        if cost_basis is not None:
+            self.set_holding_cost_basis(holding_id, cost_basis)
+        if price is not None:
+            self.set_holding_price(holding_id, price, when)
+        changed = [k for k, v in (("shares", shares), ("cost_basis", cost_basis), ("price_per_share", price))
+                   if v is not None]
+        return {"holding": self.holding(holding_id), "previous": {k: before.get(k) for k in changed}}
+
     def set_holding_shares(self, holding_id: str, shares) -> dict:
         self.holding(holding_id)
         value = amount(shares, field="shares")
