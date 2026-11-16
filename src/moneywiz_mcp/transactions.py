@@ -65,6 +65,10 @@ EDIT_TRANSFER = ("editTransferWithdrawTransaction:fromAccount:toAccount:descript
                  "exchangeRate:toAmount:toAmountCurrency:fee:feeCurrency:date:receiveDate:categories:categoriesMoney:"
                  "payeeName:imagesPaths:checkbookNumber:tagsNames:")
 DELETE = "deleteTransactionWithBalanceRecalculation:notifyAccountsBalanceChange:"
+# MoneyWiz's main window answers each new transfer with a "transfer between A
+# and B succeeded" dialog. This observer does nothing else, and it runs inside
+# the create call, so it is skipped for transfers made through the server.
+TRANSFER_NOTICE = (("iphoneMoneyWizViewController", "onTransactionCreated:"),)
 
 
 def _rate(value, field="exchange_rate") -> Decimal:
@@ -343,7 +347,7 @@ class Transactions:
                 n(float(value)), s(source["currency"]), n(float(rate)), n(float(received)), s(target["currency"]),
                 n(float(fee_value)), s(source["currency"]), date(when), date(receive or when), cats, monies,
                 self._payee(payee), NIL, opt_s(cheque_number), self._tags(tags), NIL, NIL, NIL, NIL]
-        created = self._created(self.n.invoke("manager", CREATE_TRANSFER, args))
+        created = self._created(self.n.invoke("manager", CREATE_TRANSFER, args, quiet=TRANSFER_NOTICE))
         if created["kind"] not in ("transfer_out", "transfer_in"):
             raise MoneyWizError(f"MoneyWiz created a {created['kind']} instead of a transfer")
         if status:
@@ -422,7 +426,7 @@ class Transactions:
                     n(float(received)), s(target["currency"]), n(float(fee_value)), s(account["currency"]),
                     date(when), date(received_when), cats, monies, self._payee(payee), NIL, opt_s(cheque),
                     self._tags(tags)]
-            self.n.invoke("manager", EDIT_TRANSFER, args)
+            self.n.invoke("manager", EDIT_TRANSFER, args, quiet=TRANSFER_NOTICE)
             return self.get(transaction_id)
 
         fx_source = {"currency": account["currency"]}

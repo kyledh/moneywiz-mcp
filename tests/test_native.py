@@ -19,6 +19,7 @@ class Scripted(Native):
 
     def _call(self, name, *args):
         self.calls += 1
+        self.last = args
         reply = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
         if isinstance(reply, Exception):
             raise reply
@@ -48,3 +49,11 @@ def test_other_errors_are_not_retried():
     with pytest.raises(MoneyWizError, match="Account not found"):
         n.invoke("manager", "saveData", [], encoding="B16@0:8")
     assert n.calls == 1
+
+
+def test_quiet_handlers_travel_with_the_call():
+    n = Scripted([{"value": 1}])
+    n.invoke("manager", "saveData", [], encoding="B16@0:8", quiet=(("SomeController", "onThing:"),))
+    assert n.last[0]["quiet"] == [["SomeController", "onThing:"]]
+    n.invoke("manager", "saveData", [], encoding="B16@0:8")
+    assert "quiet" not in n.last[0]
