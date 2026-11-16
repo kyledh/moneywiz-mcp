@@ -18,6 +18,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from .accounts import Accounts, KINDS
+from .backups import Backups
 from .investments import Investments
 from .lifecycle import Lifecycle
 from .catalog import Catalog
@@ -95,6 +96,7 @@ investments = Investments(native)
 scheduled = Scheduled(native)
 budgets = Budgets(native)
 reports = Reports(native)
+backups = Backups(native)
 
 AccountRef = Annotated[str, Field(description="Account id, or its exact name")]
 Amount = Annotated[str, Field(description='Positive decimal string, e.g. "12.50"')]
@@ -128,6 +130,14 @@ def moneywiz_status() -> dict:
         "account_kinds": sorted(KINDS) + ["loan"],
         "transaction_kinds": sorted(KIND_ENTITY),
     }
+
+
+@mcp.tool(annotations=EXPORT)
+def moneywiz_backup() -> dict:
+    """Make a backup of the ledger now, as MoneyWiz's automatic backups make one, into MoneyWiz's backups
+    folder (MoneyWiz's Settings > Backup restores from there). Worth doing before many changes at once.
+    The ledger itself is not changed; older backups are kept."""
+    return backups.create()
 
 
 # ---------------------------------------------------------------- D01 accounts
@@ -206,9 +216,13 @@ def moneywiz_delete_account(
     confirm_transactions: Annotated[int | None, Field(default=None, description=(
         "Required when the account still has transactions: pass the exact number, "
         "which the error message reports. They are deleted with the account."))] = None,
+    convert_transfers: Annotated[bool, Field(default=False, description=(
+        "Keep the other side of this account's transfers as ordinary income or expenses in the other "
+        "accounts, so their balances stay as they are (MoneyWiz's \"convert transfers\" when deleting)"))] = False,
 ) -> dict:
     """Delete an account. Archiving is usually the better choice."""
-    return accounts.delete(accounts.resolve(account)["id"], confirm_transactions=confirm_transactions)
+    return accounts.delete(accounts.resolve(account)["id"], confirm_transactions=confirm_transactions,
+                           convert_transfers=convert_transfers)
 
 
 @write_tool(EDIT)
@@ -331,6 +345,16 @@ def moneywiz_set_transaction_status(
     return transactions.set_status(transaction_id, status)
 
 
+@write_tool(EDIT)
+def moneywiz_set_transactions_status(
+    transaction_ids: Annotated[list[str], Field(description="Ids of the transactions to change")],
+    status: Literal["cleared", "pending", "reconciled", "unreconciled", "void", "unvoid"],
+) -> dict:
+    """Mark several transactions at once, as a selection in MoneyWiz's transaction list does.
+    Returns which changed and the state of each."""
+    return transactions.set_status_many(transaction_ids, status)
+
+
 @write_tool(WRITE)
 def moneywiz_adjust_balance(
     account: AccountRef,
@@ -390,6 +414,26 @@ def moneywiz_get_attachment(
 def moneywiz_remove_attachment(transaction_id: str, index: int) -> dict:
     """Remove one attachment from a transaction (MoneyWiz deletes its copy)."""
     return transactions.remove_attachment(transaction_id, index)
+
+
+@write_tool(WRITE)
+def moneywiz_convert_to_refund(
+    income_id: Annotated[str, Field(description="The income transaction to turn into a refund")],
+    expense_id: Annotated[str, Field(description="The expense it refunds")],
+) -> dict:
+    """Turn a recorded income into a refund of an expense (MoneyWiz's "refund from income"). MoneyWiz
+    records the refund with the income's account, amount, date, payee, notes, attachments and state,
+    files it under the expense's categories in proportion, and deletes the income."""
+    return transactions.convert_to_refund(income_id, expense_id)
+
+
+@write_tool(DESTRUCTIVE)
+def moneywiz_delete_transactions(
+    transaction_ids: Annotated[list[str], Field(description="Ids of the transactions to delete")],
+) -> dict:
+    """Delete several transactions in one call, as MoneyWiz's bulk delete does. A transfer's other leg
+    and an expense's refunds go with them; the result lists everything deleted."""
+    return transactions.delete_many(transaction_ids)
 
 
 @write_tool(DESTRUCTIVE)
@@ -594,13 +638,64 @@ def moneywiz_update_trade(transaction_id: str, shares: str | None = None, price:
                           commission: Annotated[str | None, Field(default=None, description=(
                               "Commission; negative for a rebate"))] = None, date: When | None = None,
                           description: str | None = None, memo: str | None = None,
-                          symbol: str | None = None) -> dict:
-    """Change an investment buy or sell; MoneyWiz recalculates shares and cost basis."""
+                          symbol: str | None = None,
+                          account: Annotated[str | None, Field(default=None, description=(
+                              "Move the trade to this investment account (id or exact name)"))] = None) -> dict:
+    """Change an investment buy or sell, or move it to another account; MoneyWiz recalculates shares
+    and cost basis."""
     changes = {k: v for k, v in dict(shares=shares, price=price, commission=commission, date=date,
-                                     description=description, memo=memo, symbol=symbol).items() if v is not None}
+                                     description=description, memo=memo, symbol=symbol,
+                                     account=account).items() if v is not None}
     if not changes:
         raise MoneyWizError("Give at least one field to change")
     return investments.update_trade(transaction_id, **changes)
+
+
+@write_tool(WRITE)
+def moneywiz_split_holding(
+    symbol: Annotated[str, Field(description="Ticker or alias as MoneyWiz knows it")],
+    old_shares: Annotated[str, Field(description='Shares before: "1" for a 4-for-1 split, "10" for a 1-for-10 reverse split')],
+    new_shares: Annotated[str, Field(description='Shares after: "4" for a 4-for-1 split, "1" for a 1-for-10 reverse split')],
+    date: Annotated[str, Field(description="The split's day, YYYY-MM-DD")],
+) -> dict:
+    """Record a stock split as MoneyWiz does: in every investment account holding the symbol, a buy
+    (or a sell, for a reverse split) of the share difference at price 0, marked as a split so gains
+    stay right; a manually priced holding gets the day-before price divided by the ratio."""
+    return investments.split(symbol=symbol, old_shares=old_shares, new_shares=new_shares, date_=date)
+
+
+@write_tool(WRITE)
+def moneywiz_exchange_currency(
+    account: Annotated[str, Field(description="Forex account id or exact name")],
+    from_currency: Annotated[str, Field(description="Currency given, e.g. USD")], from_amount: Amount,
+    to_currency: Annotated[str, Field(description="Currency received, e.g. HKD")], to_amount: Amount,
+    date: When,
+    fee: Annotated[str, Field(default="0", description="Fee, in fee_currency")] = "0",
+    fee_currency: Annotated[str | None, Field(default=None, description="Default: from_currency")] = None,
+    description: str = "", memo: str = "",
+) -> dict:
+    """Exchange one currency for another inside a forex account, as MoneyWiz's exchange editor does.
+    MoneyWiz values it in the account's currency from its exchange rates and refuses when it has none."""
+    return investments.exchange(account=account, from_currency=from_currency, from_amount=from_amount,
+                                to_currency=to_currency, to_amount=to_amount, date_=date, fee=fee,
+                                fee_currency=fee_currency, description=description, memo=memo)
+
+
+@write_tool(EDIT)
+def moneywiz_update_exchange(
+    transaction_id: str, from_currency: str | None = None, from_amount: str | None = None,
+    to_currency: str | None = None, to_amount: str | None = None, date: When | None = None,
+    fee: str | None = None, fee_currency: str | None = None, description: str | None = None,
+    memo: str | None = None,
+) -> dict:
+    """Change a currency exchange; fields left out keep their values (amounts as entered, see the
+    transaction's `exchange`)."""
+    changes = {k: v for k, v in dict(from_currency=from_currency, from_amount=from_amount, to_currency=to_currency,
+                                     to_amount=to_amount, date=date, fee=fee, fee_currency=fee_currency,
+                                     description=description, memo=memo).items() if v is not None}
+    if not changes:
+        raise MoneyWizError("Give at least one field to change")
+    return investments.update_exchange(transaction_id, **changes)
 
 
 @write_tool(DESTRUCTIVE)
@@ -871,6 +966,40 @@ def moneywiz_get_report_data(
     computes on a temporary copy that it discards. For figures no saved report gives, read the
     transactions themselves."""
     return reports.data(report, transactions=transactions)
+
+
+@mcp.tool(annotations=READ)
+def moneywiz_compute_report(
+    kind: ReportKind,
+    period: Annotated[str | None, Field(default=None, description=(
+        "One of " + ", ".join(PERIODS) + '; default this_month (next_3_months for a forecast)'))] = None,
+    from_date: Annotated[str | None, Field(default=None, description="period custom: first day")] = None,
+    to_date: Annotated[str | None, Field(default=None, description="period custom: last day")] = None,
+    breakdown: Annotated[str, Field(description="Over-time reports: " + ", ".join(BREAKDOWNS))] = "month",
+    chart: Annotated[str, Field(description="Categories, payees and tags reports: " + ", ".join(CHARTS))] = "pie",
+    flow: Annotated[Literal["expense", "income"], Field(description="Category, payee and tag reports")] = "expense",
+    accounts: Annotated[list[str] | None, Field(default=None, description="Default: all active accounts")] = None,
+    categories: Annotated[list[str] | None, Field(default=None, description=(
+        "Default: all categories of the flow (profit_and_loss: the expense side)"))] = None,
+    income_categories: Annotated[list[str] | None, Field(default=None, description="profit_and_loss: income side")] = None,
+    payees: list[str] | None = None, tags: list[str] | None = None,
+    budgets: Annotated[list[str] | None, Field(default=None, description="compare_budgets")] = None,  # noqa: F811
+    budget: Annotated[str | None, Field(default=None, description="budget_balance: the budget")] = None,
+    as_of: Annotated[str | None, Field(default=None, description="summary_breakdown: the date; default today")] = None,
+    include_scheduled: Annotated[bool | None, Field(default=None, description=(
+        "Count scheduled transactions; default only for a forecast"))] = None,
+    include_archived: bool = False,
+    transactions: Annotated[int, Field(description=(
+        "How many of each row's transactions to list (0-2000); 0 gives only their count"))] = 0,
+) -> dict:
+    """The figures of any MoneyWiz report, computed by MoneyWiz without saving it (the same kinds and
+    settings as moneywiz_create_report, returned as moneywiz_get_report_data returns a saved one's).
+    For questions such as spending by category last month, or cashflow by month this year."""
+    return reports.compute(kind=kind, period=period, from_date=from_date, to_date=to_date, breakdown=breakdown,
+                           chart=chart, flow=flow, accounts=accounts, categories=categories,
+                           income_categories=income_categories, payees=payees, tags=tags, budgets=budgets,
+                           budget=budget, as_of=as_of, include_scheduled=include_scheduled,
+                           include_archived=include_archived, transactions=transactions)
 
 
 @write_tool(WRITE)

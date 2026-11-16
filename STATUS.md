@@ -9,39 +9,56 @@ starting values (`tests/test_live.py`).
 
 | Area | Read | Write | Verified live |
 | --- | --- | --- | --- |
-| Accounts | yes | create, update, archive/unarchive, move, delete | cash, checking, savings, credit card, investment, forex |
+| Accounts | yes | create, update, archive/unarchive, move, delete (optionally converting its transfers, as MoneyWiz's delete dialog offers) | cash, checking, savings, credit card, investment, forex; deleting an account with transfers both ways, converted (the other account's balance unchanged, a pending leg still pending, an attachment kept) and not converted (both legs gone) |
 | Account groups | yes | create, update (incl. membership), delete, reorder | yes |
-| Transactions | yes | expense, income, transfer, refund: create, update, delete; one purchase, income or refund across several accounts; budget transfers: update | single and split categories, foreign currency, fees, cheque numbers, tags, both transfer legs, cross-currency transfers, refund links, a split across two accounts for each kind, a budget transfer's amount |
+| Transactions | yes | expense, income, transfer, refund: create, update, delete; one purchase, income or refund across several accounts; budget transfers: update; an income turned into a refund of an expense; many at once: status, delete | single and split categories, foreign currency, fees, cheque numbers, tags, both transfer legs, cross-currency transfers, refund links, a split across two accounts for each kind, a budget transfer's amount, an income with an attachment, tags and reconciled state turned into a refund (categories in proportion), status and delete for a selection with a transfer and a refund |
 | Attachments | listed per transaction, file written on request | add (image or PDF), remove; kept by every edit | two receipts added, one read back byte for byte, kept through an expense and a transfer edit (both legs), one removed, the rest deleted with the transaction (MoneyWiz removes its copies) |
-| Transaction state | yes | cleared/pending, reconciled, void | yes |
+| Transaction state | yes | cleared/pending, reconciled, void, for one transaction or a list | yes |
 | Balance adjustments (reconcile transactions) | balance set, difference booked | adjust to a balance on a date (cash, bank, credit card, investment cash; forex per currency), delete | end-of-day dating against a same-day expense, a second adjustment after later activity, delete restores the balance, forex position created and priced by MoneyWiz |
 | Categories | yes | create, rename, re-parent, reorder, merge, delete | yes, including deleting one still in use (MoneyWiz unlinks its transactions) |
 | Payees, tags | yes | create, rename, merge, delete | yes |
 | Currencies | yes | default currency, manual rates, display list | manual rate set/clear; net worth and conversions computed by MoneyWiz |
-| Investments | holdings, shares, price, cost basis | buy, sell, edit trade, delete trade, create/delete holding, manual price, share count, cost basis | buy → second buy → edit → sell → delete, with shares, cost basis and cash checked at each step |
+| Investments | holdings, shares, price, cost basis, stock-split trades, currency exchanges (amounts as entered and the positions' changes) | buy, sell, edit trade, move a trade to another account, delete trade, stock split (and reverse split), currency exchange in a forex account: create, edit, delete; create/delete holding, manual price, share count, cost basis | buy → second buy → edit → sell → delete, with shares, cost basis and cash checked at each step; a 4-for-1 split across two accounts and a 1-for-10 reverse split (shares, unchanged cost basis and cash, the adjusted manual price, nothing realized); a trade with an attachment moved to another account and renamed, the file read back byte for byte; USD → EUR with a fee, valued by MoneyWiz from its own rates, edited with its attachment kept, deleted with the USD position restored |
 | Loans | accounts, payment plan, full installment schedule | — | reads |
-| Saved reports | name, kind, period, breakdown, chart, filters, group; figures as MoneyWiz computes them (rows, totals, series, statistics, transactions per row) | 22 report kinds: create (saved), rename, move, reorder, delete; report groups: create, update membership, reorder, delete | every kind created and saved with nothing left unsaved, a custom period, group membership, a rename that keeps its place, a group deleted with its reports kept; figures of every kind computed with nothing left pending; category, cashflow, statistics, balance and table figures checked against sandbox data; a forecast and a net worth over the whole ledger leave every schedule and loan installment as it was |
+| Reports | name, kind, period, breakdown, chart, filters, group; figures as MoneyWiz computes them (rows, totals, series, statistics, transactions per row), for a saved report or for one computed without saving | 22 report kinds: create (saved), rename, move, reorder, delete; report groups: create, update membership, reorder, delete | every kind created and saved with nothing left unsaved, a custom period, group membership, a rename that keeps its place, a group deleted with its reports kept; figures of every kind computed with nothing left pending; category, cashflow, statistics, balance and table figures checked against sandbox data; a forecast and a net worth over the whole ledger leave every schedule and loan installment as it was; the same figures computed without saving, with the number of reports unchanged and nothing left unsaved |
 | Budgets | definition, current period's budgeted, available, spent and remaining, monitored accounts, categories and tags | expense and income budgets, repeating or one-time: create, update (amount for chosen periods, rollover, tags, name, period, monitored items), delete; budget groups: create, update membership, delete; transfers between budgets | monthly budget through spending past its limit, a raise for the current and future periods, rollover, tag filter added and removed, rename; one-time budget; group membership; a transfer, its edit and deletion; reordering; real budgets keep their order; MoneyWiz's "exceeded" verdict returned by the tool |
+| Backups | — | a backup now, as MoneyWiz's automatic backups make one, into its backups folder | the zip held the iCloud store (integrity check passed; transaction and account counts equal to the live ledger); nothing in the ledger changed |
 | Scheduled transactions | definition, next due date, repeat rule, app-computed upcoming dates, completion | expense, income, transfer: create, update, delete, skip, execute (with an amount override) | monthly bill with category, tags and payee: edit → execute → skip → execute a different amount → new rule; weekly series of 3 with weekend handling to completion; last-weekday-of-month rule; transfer with both legs; one-off |
 
 ## Not covered yet
 
-* **Share exchanges** (swapping one holding for another).
-  `exchangeInvestmentsShares:…` creates nothing without a `preparedValuation`
-  object from `investmentExchangeValuationForAccount:…`, and that call returns
-  nil for manually priced holdings. Passing such an object between calls would
-  also need the agent to keep a reference to a non-managed object across calls.
-* **Loan creation and payment-plan edits**: `createLoanAccountForUser:…` takes 28
-  arguments including a generated payment plan.
-* **Info cards, file import, unsaved reports.** Info cards (the summary
-  cards of investment accounts and the dashboard) are display settings.
-  `get_report_data` reads saved reports only; figures no saved report gives
-  come from the ledger tools. `createSpreadSheetReportForUser:…` (the
-  transactions table report) returns nothing on build 466 and is not
-  offered.
+* **Share-for-share exchanges.** MoneyWiz's exchange transaction is the forex
+  account's currency exchange (its editor offers currencies only), which
+  `exchange_currency` records. Swapping one security for another has no
+  editor of its own in MoneyWiz; record it as a sell and a buy.
+* **Loan creation and payment-plan edits.** The path is known but not built:
+  MoneyWiz's account wizard generates the installments with
+  `+[LoanAccount generatePaymentPlan:andInterest:andNoMonths:andStartDate:andFirstDueDate:currencyName:inContext:]`
+  (inserted, unsaved), and passes them, a payments schedule and the plan's
+  options (from `PaymentPlanFieldsViewController`) to the 29-argument
+  `createLoanAccountForUser:…registerPastTransactions:`, which can also record
+  past payments. Loans stay read-only until that is built and verified.
+* **File import (CSV, OFX, QIF, CAMT, MT940).** MoneyWiz's importers
+  (`CSVImporter`, `OFXImporter`, … `initWithURL:`) feed an interactive wizard
+  (account matching, CSV column matchups, duplicate checks) before
+  `importDataFromImporter:`. Recording parsed transactions with
+  `create_transaction` covers the same ground with more control.
+* **Several schedules' overdue occurrences at once.**
+  `executeAllWaitingScheduledTransactions:` and `skipAllWaitingScheduledTransactions:`
+  are MoneyWiz's auto-pay catch-up for one schedule with auto-pay on, run from
+  its own timer; `execute_scheduled` and `skip_scheduled` handle one
+  occurrence of any schedule. `moveTransactions:toAccount:` is not called
+  anywhere in MoneyWiz; moving goes through the edit methods it would loop
+  over (`update_transaction` and `update_trade` with another account).
+* **Info cards.** The summary cards of investment accounts and the dashboard
+  are display settings. `createSpreadSheetReportForUser:…` (the transactions
+  table report) returns nothing on build 466 and is not offered.
+* **Restoring a backup** stays with MoneyWiz (Settings > Backup): it replaces
+  the whole ledger.
 * Archiving is checked by hand, not by the live suite: MoneyWiz moves an
   archived account to "no group" and renumbers the user's real ungrouped
-  accounts, which the suite must not touch.
+  accounts, which the suite must not touch. `set_default_currency` has not
+  been run against the real ledger, to leave its currency alone.
 * Scheduled transactions: loan payment schedules are read-only (MoneyWiz
   derives them from the loan's payment plan). MoneyWiz's scheduled transfers
   have no fee (its editor always passes 0). A schedule in another currency is
@@ -53,18 +70,43 @@ starting values (`tests/test_live.py`).
 * Balance adjustments are not edited in place (MoneyWiz's editor deletes and
   recreates them too); `update_transaction` says so. A budget transfer's two
   budgets are kept when it is edited. Investment buys and sells are edited
-  with `update_trade`. A transaction split across accounts is not edited as a
-  whole: MoneyWiz keeps no link between the parts.
-* Deleting an expense deletes its refunds too (MoneyWiz's rule); the result
-  lists them.
-* An attachment that MoneyWiz has not downloaded from iCloud yet cannot be
-  read; `get_attachment` says so.
+  with `update_trade`, currency exchanges with `update_exchange`. A
+  transaction split across accounts is not edited as a whole: MoneyWiz keeps
+  no link between the parts.
 
 Out of scope: online banking, tax reports, the built-in AI features, Shortcuts,
 app preferences, passcode/security and subscriptions. Ledger lifecycle and
 iCloud sync stay with MoneyWiz.
 
 ## Known constraints
+
+* Deleting an expense deletes its refunds too (MoneyWiz's rule); the result
+  lists them.
+* A trade moved to another account or given another symbol is deleted and
+  recorded again by MoneyWiz's edit method, so it gets a new id; a split's
+  flag is kept. That method deletes the trade's stored attachment files
+  before recording it again, so the server hands it copies (written to
+  MoneyWiz's temporary directory and removed afterwards) and refuses when an
+  attachment is not downloaded from iCloud yet.
+* A stock split goes into every investment account holding the symbol or
+  alias (currency positions excepted), as in MoneyWiz; there is no
+  per-account split. It is dated at the start of the day, as MoneyWiz's
+  split editor dates it.
+* A currency exchange is valued in the account's currency from MoneyWiz's
+  exchange rates (fetched online, or manual); without one MoneyWiz records
+  nothing, and the tool says so. The fee is part of the position it is paid
+  in (100 USD with a 1 USD fee takes 101 USD out of the USD position).
+* Converting an account's transfers when deleting it names the deleted
+  account as the payee of each income or expense MoneyWiz makes from them.
+* An attachment that MoneyWiz has not downloaded from iCloud yet cannot be
+  read; `get_attachment` says so.
+* A report computed without saving is built in the main context by
+  MoneyWiz's own creator (which does not calculate), copied and deleted
+  within one main-queue turn; only the copy is calculated, in a child context.
+* A backup zips the database while MoneyWiz runs, as its automatic backups
+  do. Receipts are not part of an iCloud ledger's backup (MoneyWiz zips the
+  store's SQLite files only). Older backups in the folder are kept; MoneyWiz's
+  own automatic run would prune to its configured number.
 
 * The server works through a running MoneyWiz. It starts one hidden when none
   is running, keeps it out of the Dock while nobody looks at it, and quits it
@@ -147,7 +189,13 @@ updates its Dock badge (`-[iosMoneyWizAppDelegate updateAppBadgeNumber]`, the
 count of due bills) after scheduled-transaction changes, as it does for edits
 in the app. `set_default_currency` was not exercised, to leave the ledger's
 currency alone. `adjust_balance` was checked by its live test and a look at
-what MoneyWiz presents afterwards, not under the full tracer (running that
+what MoneyWiz presents afterwards, not under the full tracer; `split_holding`,
+`convert_to_refund`, `set_transactions_status`, `delete_transactions` and
+deleting an account with converted transfers, `compute_report`,
+`exchange_currency` and `backup` were checked by reading the observers of what
+they post (the main window's bulk-delete and the saved-report list's
+"report created" observers are empty, and none of them creates a transfer),
+not under the tracer either (running that
 tracer next to other attached clients is what crashed the app once). The
 app is started hidden (`open -g -j`) and moved out of the Dock with the
 standard activation policy; it is quit through `-[NSApplication terminate:]`,

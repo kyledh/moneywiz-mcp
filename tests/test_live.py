@@ -14,6 +14,7 @@ from decimal import Decimal
 import pytest
 
 from moneywiz_mcp.accounts import Accounts
+from moneywiz_mcp.backups import Backups
 from moneywiz_mcp.budgets import Budgets
 from moneywiz_mcp.catalog import Catalog
 from moneywiz_mcp.investments import Investments
@@ -953,3 +954,309 @@ def test_saved_report_figures_leave_nothing_behind(live):
             catalog.delete("Category", item["id"])
         for row in catalog.payees(SANDBOX + "FIGSHOP"):
             catalog.delete("Payee", row["id"])
+
+
+def _brokers(live, *suffixes):
+    return [live["accounts"].create(group_id=live["group"], name=SANDBOX + suffix, kind="investment", currency="USD",
+                                    opening_balance="10000") for suffix in suffixes]
+
+
+def _drop(live, *accounts):
+    native, transactions = live["native"], live["transactions"]
+    for account in accounts:
+        for row in _transactions_of(native, account["id"]):
+            if native.get("Transaction", row["gid"]):
+                transactions.delete(row["gid"])
+        live["accounts"].delete(account["id"])
+    for holding in native.query("InvestmentHolding", where=[["symbol", "begins", s("MCPTEST")]], fields=[])["items"]:
+        Investments(native).delete_holding(holding["gid"], delete_trades=True)
+
+
+def test_stock_split_in_every_account_holding_the_symbol(live):
+    investments, portfolio, accounts = Investments(live["native"]), live["portfolio"], live["accounts"]
+    one, two = _brokers(live, "SPLIT1", "SPLIT2")
+    try:
+        first = investments.trade(account=one["id"], side="buy", symbol="MCPTESTSPL", shares="10", price="100",
+                                  date_="2026-11-02", commission="1", holding_type="Stock", description=SANDBOX + "spl")
+        investments.trade(account=two["id"], side="buy", symbol="MCPTESTSPL", shares="3", price="90", date_="2026-11-03",
+                          holding_type="Stock", description=SANDBOX + "spl")
+        portfolio.set_holding_price(first["holding"]["id"], "120", "2026-11-05")
+
+        split = investments.split(symbol="MCPTESTSPL", old_shares="1", new_shares="4", date_="2026-11-10")
+        assert split["date"].startswith("2026-11-10T00:00:00"), "the day's start, as MoneyWiz's split editor passes it"
+        trades = {t["account_id"]: t for t in split["transactions"]}
+        assert set(trades) == {one["id"], two["id"]}
+        assert all(t["kind"] == "investment_buy" and t["stock_split"] and t["amount"] == "0"
+                   and t["price_per_share"] == "0" for t in trades.values())
+        assert (trades[one["id"]]["shares"], trades[two["id"]]["shares"]) == ("30", "9")
+        held = {h["account_id"]: h for h in split["holdings"]}
+        assert (held[one["id"]]["shares"], held[one["id"]]["cost_basis"]) == ("40", "1001")
+        assert held[one["id"]]["price_per_share"] == "30", "the day-before manual price divided by the ratio"
+        assert (held[two["id"]]["shares"], held[two["id"]]["cost_basis"]) == ("12", "270")
+        assert [accounts.get(a["id"])["balance"] for a in (one, two)] == ["8999", "9730"]
+
+        reverse = investments.split(symbol="MCPTESTSPL", old_shares="10", new_shares="1", date_="2026-11-12")
+        assert all(t["kind"] == "investment_sell" and t["stock_split"] for t in reverse["transactions"])
+        held = {h["account_id"]: h for h in reverse["holdings"]}
+        assert (held[one["id"]]["shares"], held[one["id"]]["cost_basis"], held[one["id"]]["realized_gain"]) == \
+            ("4", "1001", "0"), "a reverse split realizes nothing"
+
+        with pytest.raises(MoneyWizError):
+            investments.split(symbol="MCPTESTNONE", old_shares="1", new_shares="2", date_="2026-11-10")
+        with pytest.raises(MoneyWizError):
+            investments.split(symbol="MCPTESTSPL", old_shares="0", new_shares="2", date_="2026-11-10")
+        for trade in split["transactions"] + reverse["transactions"]:
+            investments.delete_trade(trade["id"])
+        assert [h["shares"] for h in portfolio.holdings(symbol="MCPTESTSPL")] in (["10", "3"], ["3", "10"])
+    finally:
+        _drop(live, one, two)
+
+
+def test_trades_move_between_accounts_with_their_attachments(live, tmp_path):
+    investments, transactions, accounts = Investments(live["native"]), live["transactions"], live["accounts"]
+    one, two = _brokers(live, "MOVE1", "MOVE2")
+    cash = accounts.create(group_id=live["group"], name=SANDBOX + "MOVECASH", kind="cash", currency="USD")
+    receipt = _png(tmp_path / "trade.png", 24, 24, (20, 160, 20))
+    try:
+        bought = investments.trade(account=one["id"], side="buy", symbol="MCPTESTMOV", shares="5", price="20",
+                                   date_="2026-11-04", holding_type="Stock", description=SANDBOX + "mov")
+        transactions.add_attachment(bought["transaction"]["id"], str(receipt))
+        # MoneyWiz records a trade moved to another account (or symbol) again, deleting
+        # the stored attachment files first; the server passes copies along.
+        moved = investments.update_trade(bought["transaction"]["id"], account=two["id"])
+        assert moved["replaced"] == bought["transaction"]["id"] and moved["transaction"]["account_id"] == two["id"]
+        assert moved["holding"]["shares"] == "5" and moved["account_balance"] == "9900"
+        assert moved["previous_account"]["balance"] == "10000"
+        saved = transactions.get_attachment(moved["transaction"]["id"], 0, save_to=str(tmp_path / "back.png"))
+        assert (tmp_path / "back.png").read_bytes() == receipt.read_bytes() and saved["size"] == receipt.stat().st_size
+        renamed = investments.update_trade(moved["transaction"]["id"], symbol="MCPTESTMOV2")
+        assert renamed["replaced"] == moved["transaction"]["id"] and len(renamed["transaction"]["attachments"]) == 1
+        edited = investments.update_trade(renamed["transaction"]["id"], shares="6")
+        assert "replaced" not in edited and edited["holding"]["cost_basis"] == "120"
+        with pytest.raises(MoneyWizError):
+            investments.update_trade(edited["transaction"]["id"], account=cash["id"])
+    finally:
+        _drop(live, one, two, cash)
+
+
+def test_income_becomes_a_refund_of_an_expense(live, tmp_path):
+    accounts, transactions, catalog, native = live["accounts"], live["transactions"], live["catalog"], live["native"]
+    paid = accounts.create(group_id=live["group"], name=SANDBOX + "RFI1", kind="cash", currency="CNY", opening_balance="1000")
+    back = accounts.create(group_id=live["group"], name=SANDBOX + "RFI2", kind="cash", currency="CNY", opening_balance="1000")
+    food, misc = catalog.create_category(SANDBOX + "RFIFOOD", "expense"), catalog.create_category(SANDBOX + "RFIMISC", "expense")
+    earned = catalog.create_category(SANDBOX + "RFIINC", "income")
+    try:
+        expense = transactions.create(account=paid["id"], kind="expense", amount_="50", date_="2026-11-10",
+                                      description=SANDBOX + "dinner", tags=[SANDBOX + "RFIT1"],
+                                      categories=[{"category": food["id"], "amount": "30"},
+                                                  {"category": misc["id"], "amount": "20"}])
+        income = transactions.create(account=back["id"], kind="income", amount_="10", date_="2026-11-12",
+                                     description=SANDBOX + "share", categories=earned["id"], tags=[SANDBOX + "RFIT2"],
+                                     memo="note", payee=SANDBOX + "Friend")
+        transactions.add_attachment(income["id"], str(_png(tmp_path / "i.png", 16, 16, (1, 2, 3))))
+        transactions.set_status(income["id"], "reconciled")
+        with pytest.raises(MoneyWizError):
+            transactions.convert_to_refund(expense["id"], income["id"])
+        result = transactions.convert_to_refund(income["id"], expense["id"])
+        refund = result["refund"]
+        assert result["income_deleted"] and native.get("Transaction", income["id"]) is None
+        assert (refund["kind"], refund["amount"], refund["account_id"], refund["refund_of_ids"]) == \
+            ("refund", "10", back["id"], [expense["id"]])
+        assert (refund["memo"], refund["payee"], refund["reconciled"]) == ("note", SANDBOX + "Friend", True)
+        assert sorted(refund["tags"]) == [SANDBOX + "RFIT1", SANDBOX + "RFIT2"]
+        assert {c["id"]: c["amount"] for c in refund["categories"]} == {food["id"]: "6", misc["id"]: "4"}, \
+            "the expense's categories in proportion"
+        assert len(refund["attachments"]) == 1 and all(os.path.exists(x["path"]) for x in _images_of(native, refund["id"]))
+        assert accounts.get(back["id"])["balance"] == "1010"
+    finally:
+        _drop(live, paid, back)
+        for category in (food, misc, earned):
+            catalog.delete("Category", category["id"])
+
+
+def test_bulk_status_and_delete(live):
+    accounts, transactions, native = live["accounts"], live["transactions"], live["native"]
+    one = accounts.create(group_id=live["group"], name=SANDBOX + "BULK1", kind="cash", currency="CNY", opening_balance="100")
+    two = accounts.create(group_id=live["group"], name=SANDBOX + "BULK2", kind="cash", currency="CNY", opening_balance="100")
+    try:
+        ids = [transactions.create(account=one["id"], kind="expense", amount_=str(k), date_="2026-11-14",
+                                   description=SANDBOX + f"bulk{k}")["id"] for k in (1, 2, 3)]
+        transfer = transactions.create(account=one["id"], kind="transfer", amount_="7", date_="2026-11-14",
+                                       transfer_to=two["id"], description=SANDBOX + "bulkx")
+        ids.append(transfer["id"])
+        pending = transactions.set_status_many(ids, "pending")
+        assert pending["changed"] == ids and {x["status"] for x in pending["transactions"]} == {"pending"}
+        assert transactions.set_status_many(ids, "pending")["changed"] == []
+        both = ids + [transfer["other_leg_id"]]
+        reconciled = transactions.set_status_many(both, "reconciled")
+        assert all(x["reconciled"] and x["status"] == "cleared" for x in reconciled["transactions"]), \
+            "reconciling clears a pending transaction, as in MoneyWiz"
+        assert transactions.set_status_many(ids[:2], "unreconciled")["changed"] == ids[:2]
+        with pytest.raises(MoneyWizError):
+            transactions.set_status_many(ids + ["no-such-transaction"], "cleared")
+        refund = transactions.create(account=one["id"], kind="refund", amount_="1", date_="2026-11-15",
+                                     refund_of=ids[2], description=SANDBOX + "bulkref")
+        gone = transactions.delete_many([ids[0], ids[2], transfer["id"]])
+        assert set(gone["deleted"]) == {ids[0], ids[2], transfer["id"], transfer["other_leg_id"], refund["id"]}
+        assert set(gone["also_deleted"]) == {transfer["other_leg_id"], refund["id"]}
+        assert [accounts.get(a["id"])["balance"] for a in (one, two)] == ["98", "100"]
+        assert native.status()["context"]["pending"] == 0
+    finally:
+        _drop(live, one, two)
+
+
+def test_deleting_an_account_can_keep_its_transfers(live, tmp_path):
+    accounts, transactions = live["accounts"], live["transactions"]
+    other = accounts.create(group_id=live["group"], name=SANDBOX + "KEEP", kind="cash", currency="CNY", opening_balance="1000")
+    gone = accounts.create(group_id=live["group"], name=SANDBOX + "GONE", kind="cash", currency="CNY", opening_balance="500")
+    plain = accounts.create(group_id=live["group"], name=SANDBOX + "GONE2", kind="cash", currency="CNY", opening_balance="500")
+    try:
+        sent = transactions.create(account=gone["id"], kind="transfer", amount_="40", date_="2026-11-11",
+                                   transfer_to=other["id"], description=SANDBOX + "in", memo="m1")
+        received = transactions.create(account=other["id"], kind="transfer", amount_="15", date_="2026-11-12",
+                                       transfer_to=gone["id"], description=SANDBOX + "out")
+        transactions.set_status(received["id"], "pending")
+        transactions.add_attachment(sent["id"], str(_png(tmp_path / "t.png", 8, 8, (9, 9, 9))))
+        transactions.create(account=gone["id"], kind="expense", amount_="5", date_="2026-11-13", description=SANDBOX + "x")
+        balance = accounts.get(other["id"])["balance"]
+        with pytest.raises(MoneyWizError):
+            accounts.delete(gone["id"], convert_transfers=True)  # the transaction count is still required
+        result = accounts.delete(gone["id"], confirm_transactions=3, convert_transfers=True)
+        assert (result["deleted_transactions"], result["converted_transfers"]) == (3, 2)
+        assert accounts.get(other["id"])["balance"] == balance
+        kept = {t["description"]: t for t in transactions.list(account=other["id"])["transactions"]}
+        assert (kept[SANDBOX + "in"]["kind"], kept[SANDBOX + "in"]["amount"], kept[SANDBOX + "in"]["memo"]) == \
+            ("income", "40", "m1")
+        assert len(kept[SANDBOX + "in"]["attachments"]) == 1
+        assert (kept[SANDBOX + "out"]["kind"], kept[SANDBOX + "out"]["status"]) == ("expense", "pending")
+        # MoneyWiz names the deleted account as the payee of what it converted.
+        assert kept[SANDBOX + "in"]["payee"] == SANDBOX + "GONE"
+
+        lost = transactions.create(account=plain["id"], kind="transfer", amount_="9", date_="2026-11-14",
+                                   transfer_to=other["id"], description=SANDBOX + "lost")
+        result = accounts.delete(plain["id"], confirm_transactions=1)
+        assert result["deleted_transfers"] == 1
+        assert live["native"].get("Transaction", lost["other_leg_id"]) is None, "without converting, both legs go"
+        assert accounts.get(other["id"])["balance"] == balance
+    finally:
+        for account in (other, gone, plain):
+            if live["native"].get("Account", account["id"]):
+                _drop(live, account)
+
+
+def test_unsaved_report_figures_save_and_leave_nothing(live):
+    accounts, catalog, native, transactions = live["accounts"], live["catalog"], live["native"], live["transactions"]
+    reports = Reports(native)
+
+    def schedules():
+        def rows(entity, fields):
+            return sorted(native.query(entity, fields=fields)["items"], key=lambda r: r["gid"] or "")
+        return (rows("ScheduledTransactionHandler", ["executeDate", "executesCount"]),
+                native.count("PaymentPlanItem", [["paid", "eq", {"nb": True}]]), native.count("CategoryAssigment"))
+    account = accounts.create(group_id=live["group"], name=SANDBOX + "ADHOC", kind="cash", currency="CNY",
+                              opening_balance="1000")
+    food = catalog.create_category(SANDBOX + "ADHFOOD", "expense")
+    rent = catalog.create_category(SANDBOX + "ADHRENT", "expense")
+    pay = catalog.create_category(SANDBOX + "ADHPAY", "income")
+    for amount, category, day in (("30", food, "2026-11-03"), ("20", food, "2026-11-10"), ("500", rent, "2026-11-05")):
+        transactions.create(account=account["id"], kind="expense", amount_=amount, date_=day, categories=category["id"],
+                            description=SANDBOX + "adhoc")
+    transactions.create(account=account["id"], kind="income", amount_="800", date_="2026-11-01",
+                        categories=pay["id"], description=SANDBOX + "adhoc")
+    november = dict(period="custom", from_date="2026-11-01", to_date="2026-11-30", accounts=[account["id"]],
+                    categories=[food["id"], rent["id"]], income_categories=[pay["id"]])
+    reports_before, schedules_before = native.count("CustomReport"), schedules()
+    try:
+        def figures(kind, **options):
+            data = reports.compute(kind=kind, **(november | options))
+            assert native.status()["context"]["pending"] == 0, f"{kind}: something was left unsaved"
+            assert native.count("CustomReport") == reports_before, f"{kind}: a report was kept"
+            return data
+
+        cats = figures("categories", transactions=1)
+        assert cats["report"]["kind"] == "categories"
+        assert cats["totals"] == {"figures": {"amount": "-550", "percent": "100"}, "currency": "CNY"}
+        by_name = {row["name"]: row for row in cats["rows"]}
+        assert by_name[SANDBOX + "ADHFOOD"]["figures"]["amount"] == "-50"
+        assert by_name[SANDBOX + "ADHFOOD"]["transaction_count"] == 2
+        assert len(by_name[SANDBOX + "ADHFOOD"]["transactions"]) == 1
+
+        flow = figures("cashflow")
+        month = next(row for row in flow["rows"] if row.get("date", "").startswith("2026-11-01"))
+        assert month["figures"]["expenses"] == "550" and month["figures"]["incomes"] == "800"
+
+        stats = figures("statistics")["statistics"]
+        assert stats["expenses"]["total"] == "-550" and stats["incomes"]["total"] == "800"
+
+        assert any(r.get("object", {}).get("id") == account["id"]
+                   for r in figures("forecast", period=None, from_date=None, to_date=None)["rows"])
+        assert "series" in figures("net_worth", period="this_year", accounts=None)
+        assert schedules() == schedules_before, "the forecast's scratch occurrences stayed out of the ledger"
+        with pytest.raises(MoneyWizError):
+            reports.compute(kind="no_such_kind")
+    finally:
+        accounts.delete(account["id"], confirm_transactions=4)
+        for item in (food, rent, pay):
+            catalog.delete("Category", item["id"])
+
+
+def test_backup_goes_into_moneywiz_backups_folder(live):
+    native = live["native"]
+    counts = snapshot(native)
+    folder = os.path.expanduser("~/Library/Containers/com.moneywiz.personalfinance/Data/MoneyWizBackups")
+    existing = set(os.listdir(folder)) if os.path.isdir(folder) else set()
+    made = Backups(native).create()
+    try:
+        assert "/MoneyWizBackups/" in made["path"] or made["path"].startswith(os.path.expanduser("~"))
+        assert made["file_name"].startswith("iMoneyWiz-") and made["file_name"].endswith(".zip")
+        assert made["size"] > 0 and os.path.getsize(made["path"]) == made["size"]
+        assert native.status()["context"]["pending"] == 0 and snapshot(native) == counts
+    finally:
+        # Each run would otherwise leave a copy of the whole database in the real backups folder.
+        # A backup made in the same minute as an existing one replaces it (same name, as in MoneyWiz);
+        # that one is the user's and stays.
+        if made["file_name"] not in existing and os.path.basename(made["path"]) == made["file_name"] \
+                and os.path.exists(made["path"]):
+            os.remove(made["path"])
+
+
+def test_currency_exchange_in_a_forex_account(live, tmp_path):
+    accounts, transactions, native, portfolio = live["accounts"], live["transactions"], live["native"], live["portfolio"]
+    investments = Investments(native)
+    fx = accounts.create(group_id=live["group"], name=SANDBOX + "FXEX", kind="forex", currency="CNY")
+    cash = accounts.create(group_id=live["group"], name=SANDBOX + "FXCASH", kind="cash", currency="CNY")
+    try:
+        transactions.adjust_balance(account=fx["id"], balance="1000", currency="USD", date_="2026-11-01",
+                                    description=SANDBOX + "usd")
+        # MoneyWiz values the exchange from its own rates (none are set here).
+        made = investments.exchange(account=fx["id"], from_currency="USD", from_amount="100", to_currency="EUR",
+                                    to_amount="92", date_="2026-11-05", fee="1", description=SANDBOX + "fx", memo="m")
+        trade = made["transaction"]
+        assert trade["kind"] == "investment_exchange"
+        assert trade["exchange"] == {"from_currency": "USD", "from_amount": "100", "to_currency": "EUR", "to_amount": "92",
+                                     "fee": "1", "fee_currency": "USD", "positions": {"USD": "-101", "EUR": "92"}}
+        held = {h["symbol"]: h for h in made["holdings"]}
+        assert (held["USD"]["shares"], held["EUR"]["shares"]) == ("899", "92")
+        assert Decimal(trade["amount"]) == -101 * Decimal(held["USD"]["price_per_share"]), "valued in CNY at the USD rate"
+        assert native.status()["context"]["pending"] == 0
+        transactions.add_attachment(trade["id"], str(_png(tmp_path / "fx.png", 8, 8, (5, 5, 5))))
+        edited = investments.update_exchange(trade["id"], to_amount="93")
+        assert edited["transaction"]["id"] == trade["id"] and edited["transaction"]["exchange"]["to_amount"] == "93"
+        assert len(edited["transaction"]["attachments"]) == 1
+        assert {h["symbol"]: h["shares"] for h in edited["holdings"]}["EUR"] == "93"
+        with pytest.raises(MoneyWizError):
+            investments.exchange(account=cash["id"], from_currency="USD", from_amount="1", to_currency="EUR",
+                                 to_amount="1", date_="2026-11-05")
+        with pytest.raises(MoneyWizError):
+            investments.exchange(account=fx["id"], from_currency="USD", from_amount="1", to_currency="usd",
+                                 to_amount="1", date_="2026-11-05")
+        investments.delete_trade(trade["id"])
+        assert {h["symbol"]: h["shares"] for h in portfolio.holdings(fx["id"])}["USD"] == "1000"
+    finally:
+        for account in (fx, cash):
+            for row in _transactions_of(native, account["id"]):
+                if native.get("Transaction", row["gid"]):
+                    transactions.delete(row["gid"])
+            for holding in portfolio.holdings(account["id"]):
+                investments.delete_holding(holding["id"], delete_trades=True)
+            accounts.delete(account["id"])

@@ -114,20 +114,20 @@ A ledger behind a passcode still has to be unlocked by hand.
 
 ## Tools
 
-82 tools, all prefixed `moneywiz_`:
+90 tools, all prefixed `moneywiz_`:
 
 | Area | Tools |
 | --- | --- |
-| Status | `status` |
+| Status, backup | `status`, `backup` |
 | Accounts | `list_accounts`, `get_account`, `create_account`, `update_account`, `archive_account`, `delete_account`, `move_account` |
 | Account groups | `list_account_groups`, `create_account_group`, `update_account_group`, `delete_account_group` |
-| Transactions | `list_transactions`, `get_transaction`, `create_transaction`, `update_transaction`, `set_transaction_status`, `delete_transaction`, `adjust_balance`, `create_split_transaction`, `add_attachment`, `get_attachment`, `remove_attachment` |
+| Transactions | `list_transactions`, `get_transaction`, `create_transaction`, `update_transaction`, `set_transaction_status`, `set_transactions_status`, `delete_transaction`, `delete_transactions`, `convert_to_refund`, `adjust_balance`, `create_split_transaction`, `add_attachment`, `get_attachment`, `remove_attachment` |
 | Categories, payees, tags | `list_categories`, `list_payees`, `list_tags`, `create_category`, `update_category`, `reorder_categories`, `create_payee`, `create_tag`, `rename_payee`, `rename_tag`, `delete_catalog_object`, `merge_catalog_objects`, `catalog_usage` |
 | Currencies | `currency_settings`, `net_worth`, `set_default_currency`, `get_exchange_rate`, `set_exchange_rate`, `clear_exchange_rate`, `set_display_currencies` |
-| Investments | `list_holdings`, `trade`, `update_trade`, `delete_trade`, `create_holding`, `delete_holding`, `set_holding_price`, `set_holding_shares`, `set_holding_cost_basis` |
+| Investments | `list_holdings`, `trade`, `update_trade`, `delete_trade`, `split_holding`, `exchange_currency`, `update_exchange`, `create_holding`, `delete_holding`, `set_holding_price`, `set_holding_shares`, `set_holding_cost_basis` |
 | Loans | `list_loans`, `loan_schedule` |
 | Scheduled transactions | `list_scheduled`, `create_scheduled`, `update_scheduled`, `delete_scheduled`, `skip_scheduled`, `execute_scheduled` |
-| Saved reports | `list_reports`, `get_report_data`, `create_report`, `update_report`, `reorder_reports`, `delete_report`, `list_report_groups`, `create_report_group`, `update_report_group`, `delete_report_group`, `reorder_report_groups` |
+| Reports | `list_reports`, `get_report_data`, `compute_report`, `create_report`, `update_report`, `reorder_reports`, `delete_report`, `list_report_groups`, `create_report_group`, `update_report_group`, `delete_report_group`, `reorder_report_groups` |
 | Budgets | `list_budgets`, `create_budget`, `update_budget`, `delete_budget`, `transfer_between_budgets`, `list_budget_groups`, `create_budget_group`, `update_budget_group`, `delete_budget_group`, `reorder_budgets`, `reorder_budget_groups` |
 
 What is and is not covered yet is listed in [STATUS.md](STATUS.md).
@@ -162,7 +162,24 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
   MoneyWiz recalculates shares, cost basis and the account's cash. Selling a
   symbol you do not hold opens a short position (negative shares), and a later
   buy covers it. A negative commission is a rebate: a buy then costs
-  `shares x price - rebate`.
+  `shares x price - rebate`. `update_trade` can move a trade to another
+  investment account; MoneyWiz does that (and a change of symbol) by
+  recording the trade again, so it comes back with a new id (`replaced`
+  names the old one), its attachments carried over.
+* **Stock splits** (`split_holding`) are MoneyWiz's own: give the shares
+  before and after (`1` → `4` for a 4-for-1 split, `10` → `1` for a reverse
+  split) and the day. In every investment account holding the symbol,
+  MoneyWiz records the difference as a buy (or a sell) at price 0, marked
+  `stock_split`, so cost basis and gains stay as they were; a manually priced
+  holding gets the previous day's price divided by the ratio.
+* **Refund from income** (`convert_to_refund`): an income that was really
+  money back for an expense becomes a refund of it, as MoneyWiz's "refund
+  from income" does: same account, amount, date, payee, notes, attachments
+  and state, the expense's categories in proportion, both sets of tags. The
+  income is deleted.
+* **Several transactions at once**: `set_transactions_status` and
+  `delete_transactions` work on a list of ids, as a selection in MoneyWiz's
+  transaction list does (reconciling and deleting are one MoneyWiz call each).
 * **Several accounts** (`create_split_transaction`): one purchase, income or
   refund paid from several accounts becomes one ordinary transaction per
   account, as in MoneyWiz's editor with several accounts selected; the
@@ -184,8 +201,14 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
   (with nested rows for tables and drill-downs, and MoneyWiz's own total and
   average rows), totals, chart series over time, statistics, and optionally
   each row's transactions. MoneyWiz computes on a temporary copy that it
-  discards, so reading a report writes nothing. For figures no saved report
-  gives, read the transactions.
+  discards, so reading a report writes nothing. `compute_report` gives the
+  same figures for any report kind and settings without saving a report
+  (spending by category last month, cashflow by month this year).
+* **Currency exchanges** (`exchange_currency`) are MoneyWiz's exchange inside
+  a forex account: an amount of one currency for an amount of another, with a
+  fee in either. MoneyWiz values it in the account's currency from its own
+  exchange rates and records nothing without one (set a manual rate first).
+  The fee comes out of the position it is paid in.
 * **Balance adjustments** (`adjust_balance`) are MoneyWiz's "adjust balance":
   give the balance a statement shows on a date and MoneyWiz books the
   difference from its own running balance as a reconcile transaction. A bare
@@ -239,12 +262,21 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
   not count.
 * Deleting an account deletes its transactions, so the tool refuses unless you
   pass the exact transaction count it reports. Archiving is usually better.
+  Its transfers go too, both legs, which changes the other accounts'
+  balances; `convert_transfers` keeps the other side of each as an ordinary
+  income or expense (MoneyWiz names the deleted account as its payee), as
+  MoneyWiz's delete dialog offers.
+* Deleting several transactions also deletes what goes with each (a
+  transfer's other leg, an expense's refunds); the result lists them.
 * Deleting a category also deletes its subcategories; transactions that used
   it, or a deleted payee or tag, stay and lose that link. The result lists what
   referenced it. Deleting a holding keeps its trades unless `delete_trades` is
   set. Merging is usually the better choice.
 * Each call saves on its own, like an edit in the app; several calls are not
-  one transaction.
+  one transaction. Before many changes at once, `backup` makes a backup as
+  MoneyWiz's automatic backups do, into MoneyWiz's backups folder; restoring
+  one is done in MoneyWiz (Settings > Backup). An iCloud ledger's backup holds
+  its database, not the receipt files.
 * Saved locally is not synced: MoneyWiz uploads to iCloud on its own schedule.
 * Avoid editing the same records in MoneyWiz while a tool call runs.
 

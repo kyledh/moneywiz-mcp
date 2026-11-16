@@ -80,6 +80,12 @@ def parse_when(value: str, *, field: str = "date") -> datetime:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=local_tz())
 
 
+def day_start(value: str, *, field: str = "date") -> datetime:
+    """The local start of a day, as MoneyWiz's editors pass dates (timelessDateFromDate:)."""
+    moment = parse_when(value, field=field).astimezone(local_tz())
+    return datetime.combine(moment.date(), time(0, 0), tzinfo=local_tz())
+
+
 def parse_bound(value: str | None, *, end: bool = False, field: str = "date") -> datetime | None:
     """Range bound: a bare date means local midnight (end bound: the following midnight)."""
     if value is None:

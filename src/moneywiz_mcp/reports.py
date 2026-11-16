@@ -16,7 +16,7 @@ from datetime import datetime, time, timedelta, timezone
 from .accounts import Accounts
 from .budgets import Budgets
 from .catalog import Catalog
-from .native import Native, MoneyWizError, s, i, b, ni, ref, arr, date, NIL, USER, prev
+from .native import Native, MoneyWizError, s, i, b, ni, ref, arr, date, NIL, USER, prev, recorded_encoding
 from .values import clean, local_tz, money, parse_when, show_date
 
 # Report kinds the server creates, by MoneyWiz's typed creator.
@@ -314,12 +314,30 @@ class Reports:
             raise MoneyWizError(f"transactions: a count from 0 to {MAX_TRANSACTIONS}")
         row = self.resolve(report_ref)
         kind = TYPE_KINDS.get(row.get("predefinedReportType"))
+        return {"report": view(row)} | self._figures_of({"gid": row["gid"]}, kind, row.get("predefinedDatesPeriod"),
+                                                        transactions)
+
+    def compute(self, *, transactions: int = 0, **settings) -> dict:
+        """Figures of a report that is not saved: MoneyWiz builds it as its report editor
+        does, the agent copies it and discards it at once, and only the copy is
+        calculated (see the agent's reportData). Nothing is saved or left behind."""
+        if not isinstance(transactions, int) or isinstance(transactions, bool) or \
+                not 0 <= transactions <= MAX_TRANSACTIONS:
+            raise MoneyWizError(f"transactions: a count from 0 to {MAX_TRANSACTIONS}")
+        selector, args, period_value = self._creator(**settings)
+        figures = self._figures_of({"create": {"selector": selector, "args": args,
+                                               "encoding": recorded_encoding("manager", selector)}},
+                                   settings["kind"], period_value, transactions)
+        asked = clean({k: v for k, v in settings.items() if v not in (None, False, [])})
+        return {"report": asked} | figures
+
+    def _figures_of(self, source: dict, kind: str | None, period_value, transactions: int) -> dict:
         group = {"fields": ROW_FIELDS, "each": {"subGroupesArray": ["row", None],
                                                 "transactionsArray": ["transaction", transactions]}}
         if kind == "statistics":
             group["each"]["groupObject"] = ["statistics", None]
         result = self.n.report_data({
-            "gid": row["gid"],
+            **source,
             "fields": ["fromDate", "toDate", "currencyName"],
             "root": {"transactionsRootGroup": "row", "chartViewData": "chart"},
             "shapes": {"row": group, "transaction": {"fields": TRANSACTION_FIELDS},
@@ -333,12 +351,9 @@ class Reports:
             totals = {}  # the table reports' root: their totals are a row of their own
         chart = result.get("chartViewData") or {}
         out = {
-            "report": view(row),
             # MoneyWiz's dates for the period, worked out when computing; distant ones mean "all time".
-            "from_date": _value(result.get("fromDate")) if row.get("predefinedDatesPeriod") != PERIODS["all_time"]
-            else None,
-            "to_date": _value(result.get("toDate")) if row.get("predefinedDatesPeriod") != PERIODS["all_time"]
-            else None,
+            "from_date": _value(result.get("fromDate")) if period_value != PERIODS["all_time"] else None,
+            "to_date": _value(result.get("toDate")) if period_value != PERIODS["all_time"] else None,
             "currency": result.get("currencyName"),
             "totals": clean(totals) or None,
             "rows": _rows(root.get("subGroupesArray") or []),
@@ -381,16 +396,30 @@ class Reports:
     def _all(self, entity: str, where=None) -> list[str]:
         return [r["gid"] for r in self.n.query(entity, where=where or [], fields=[])["items"]]
 
-    def create(self, *, kind: str, name: str, period: str | None = None, from_date: str | None = None,
-               to_date: str | None = None, breakdown: str = "month", chart: str = "pie", flow: str = "expense",
-               accounts=None, categories=None, income_categories=None, payees=None, tags=None, budgets=None,
-               budget: str | None = None, as_of: str | None = None, include_scheduled: bool | None = None,
-               include_archived: bool = False, group=None) -> dict:
+    def create(self, *, name: str, group=None, **settings) -> dict:
+        if not isinstance(name, str) or not name.strip():
+            raise MoneyWizError("name: a saved report needs a name")
+        selector, args, _ = self._creator(**settings)
+        group_arg = ni(self.group(group)["group_id"]) if group not in (None, "") else NIL
+        result = self.n.batch([
+            {"target": "manager", "selector": selector, "args": args},
+            {"target": "manager", "selector": SAVE, "args": [prev(0), s(name), group_arg], "save": True},
+        ])
+        created = result["results"][0]["value"]
+        if not created or not created.get("gid"):
+            raise MoneyWizError("MoneyWiz did not create the report")
+        return self.get(created["gid"])
+
+    def _creator(self, *, kind: str, period: str | None = None, from_date: str | None = None,
+                 to_date: str | None = None, breakdown: str = "month", chart: str = "pie", flow: str = "expense",
+                 accounts=None, categories=None, income_categories=None, payees=None, tags=None, budgets=None,
+                 budget: str | None = None, as_of: str | None = None, include_scheduled: bool | None = None,
+                 include_archived: bool = False):
+        """MoneyWiz's typed creator for a report kind and its arguments, as its report
+        editor passes them; also the period's enum value."""
         selector = KINDS.get(kind)
         if selector is None:
             raise MoneyWizError(f"kind must be one of {', '.join(KINDS)}")
-        if not isinstance(name, str) or not name.strip():
-            raise MoneyWizError("name: a saved report needs a name")
         if flow not in ("expense", "income"):
             raise MoneyWizError("flow must be expense or income")
         expenses = flow == "expense"
@@ -468,16 +497,7 @@ class Reports:
             "includeArchivedAccounts": lambda: b(include_archived),
         }
         keywords = selector[:-1].split(":")
-        args = [USER] + [builders[k]() for k in keywords[1:]]
-        group_arg = ni(self.group(group)["group_id"]) if group not in (None, "") else NIL
-        result = self.n.batch([
-            {"target": "manager", "selector": selector, "args": args},
-            {"target": "manager", "selector": SAVE, "args": [prev(0), s(name), group_arg], "save": True},
-        ])
-        created = result["results"][0]["value"]
-        if not created or not created.get("gid"):
-            raise MoneyWizError("MoneyWiz did not create the report")
-        return self.get(created["gid"])
+        return selector, [USER] + [builders[k]() for k in keywords[1:]], period_value
 
     # ------------------------------------------------------------ change
 

@@ -278,9 +278,16 @@ class Native:
         return self._call("attachment", transaction_id, index)
 
     def report_data(self, spec: dict, calls: dict[str, list[str]]) -> dict:
-        """Compute a saved report in a forked child context (see the agent's reportData).
+        """Compute a report in a forked child context (see the agent's reportData): a saved
+        one (spec gid), or one MoneyWiz builds unsaved for it (spec create), which, like a
+        write, waits for MoneyWiz's own unsaved objects to clear first.
         Returns the agent's tagged values ($date, $dec, $ref) undecoded."""
-        return self._call("reportData", {**spec, "calls": recorded_calls(calls)})
+        spec = {**spec, "calls": recorded_calls(calls)}
+        return self._write("reportData", spec) if spec.get("create") else self._call("reportData", spec)
+
+    def backup(self, calls: dict[str, list[str]], *, timeout: float) -> dict:
+        """Have MoneyWiz make a backup into its backups folder (see the agent's backup)."""
+        return self._call("backup", {"calls": recorded_calls(calls), "timeout": timeout})
 
     # Introspection for scripts/check_build.py (read-only).
     def live_signatures(self, pairs: list[tuple[str, str]]) -> list[str | None]:
