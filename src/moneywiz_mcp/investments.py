@@ -102,7 +102,8 @@ class Investments:
         _symbol(symbol)
         quantity = amount(shares, field="shares")
         unit = amount(price, field="price", allow_zero=True)
-        fee = amount(commission, field="commission", allow_zero=True)
+        # A negative commission is a rebate; MoneyWiz stores and nets it as given.
+        fee = amount(commission, field="commission", allow_zero=True, allow_negative=True)
         existing = self._holding_of(resolved["id"], symbol)
         if side == "sell" and existing is None:
             raise MoneyWizError(f"{resolved['name']!r} holds no {symbol}; buy it or add the holding first")
@@ -144,7 +145,8 @@ class Investments:
         symbol = _symbol(changes.get("symbol", current.get("symbol")))
         quantity = amount(changes.get("shares", current.get("shares")), field="shares")
         unit = amount(changes.get("price", current.get("price_per_share")), field="price", allow_zero=True)
-        fee = amount(changes.get("commission", current.get("fee") or 0), field="commission", allow_zero=True)
+        fee = amount(changes.get("commission", current.get("fee") or 0), field="commission", allow_zero=True,
+                     allow_negative=True)
         when = parse_when(changes["date"]) if changes.get("date") else parse_when(current["date"])
         holding = self._holding_of(account["id"], symbol) or {}
         self.n.invoke("manager", selector,

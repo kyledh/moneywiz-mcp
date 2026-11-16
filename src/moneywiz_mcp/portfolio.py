@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from .accounts import Accounts
 from .native import Native, MoneyWizError, s, n, nb, ref, date, NIL
-from .values import amount, money, parse_when, show_date, clean
+from .values import amount, money, parse_when, show_date, clean, stored
 
 HOLDING_FIELDS = ["symbol", "symbolAlias", "desc", "assetClass", "holdingType", "cusip", "pricePerShare",
                   "openningNumberOfShares", "costBasisOfMissingOBShares", "investmentObjectType",
@@ -55,7 +55,7 @@ def holding_view(row: dict) -> dict:
         "currency": row.get("investmentAccount.currencyName"),
         "shares": money(row.get("numberOfShares")),
         "opening_shares": money(row.get("openningNumberOfShares")),
-        "price_per_share": money(row.get("pricePerShare")),
+        "price_per_share": stored(row.get("pricePerShare")),
         "current_value": money(row.get("currentValue")),
         "cost_basis": money(row.get("costBasis")),
         "profit_loss": money(row.get("profitLoss")),
@@ -220,7 +220,7 @@ class Portfolio:
             out.append(clean({
                 "id": row["gid"], "kind": SCHEDULED_KINDS.get(row["$ref"], row["$ref"]),
                 "description": row.get("desc"), "memo": row.get("notes") or None,
-                "amount": money(row.get("amount")), "currency": row.get("currencyName"),
+                "amount": stored(row.get("amount")), "currency": row.get("currencyName"),
                 "account_id": row.get("account.GID"), "account": row.get("account.name"),
                 "transfer_to_id": row.get("recipientAccount.GID"), "transfer_to": row.get("recipientAccount.name"),
                 "next_date": show_date(row.get("executeDate")),
@@ -234,6 +234,6 @@ class Portfolio:
                 "executions": row.get("executesCount"),
                 "due_now": row.get("waitingExecutesCount") or None,
                 "payee": row.get("payee.name"), "tags": row.get("tags.name") or None,
-                "categories": [{"name": name, "amount": money(value)} for name, value in categories] or None,
+                "categories": [{"name": name, "amount": stored(value)} for name, value in categories] or None,
             }))
         return out
