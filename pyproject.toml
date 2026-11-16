@@ -1,6 +1,6 @@
 [project]
 name = "moneywiz-mcp"
-version = "0.1.6"
+version = "0.1.7"
 description = "Unofficial MCP server for MoneyWiz on macOS: drives the running app's own business methods"
 readme = "README.md"
 license = "MIT"
