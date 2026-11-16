@@ -80,6 +80,10 @@ iCloud sync stay with MoneyWiz.
   dialog suppression patches nothing between calls; 0.1.1–0.1.2 kept a code
   patch in place, and two clients unloading in the wrong order crashed
   MoneyWiz.
+* Recording a description in MoneyWiz's autocomplete history schedules
+  `-[DataAccessor purge1YearOldStringHistoryItems]`, which deletes year-old
+  suggestions a moment later without saving. That upkeep does not hold up
+  writes; the next save commits it, as MoneyWiz's own would.
 * Saved locally is not synced; MoneyWiz uploads to iCloud on its own schedule.
 * Several calls are not atomic: each business call saves independently.
 * Only build 466's `MoneyWizManager` signatures are recorded. On another build,
@@ -96,7 +100,12 @@ for its own transfers, and the "all payments are completed: delete or keep this
 scheduled transaction?" alert that
 `-[iphoneMoneyWizViewController onScheduledWaitToExecuteCountChanged:]`
 schedules when a one-off has run or a series has recorded its last occurrence,
-which the server skips for its own scheduled-transaction calls. MoneyWiz also
+which the server skips for its own scheduled-transaction calls.
+`-[iphoneMoneyWizViewController onBudgetsWarning:]` raises "the following budgets
+are low / exceeded" whenever a transaction pushes a budget over. It fired for a
+plain `create_transaction` in 0.1.3 and earlier; it is now skipped for every
+saving call. This was found by reading the observer and confirmed by checking
+what MoneyWiz presents after a sandbox run, without the tracer. MoneyWiz also
 updates its Dock badge (`-[iosMoneyWizAppDelegate updateAppBadgeNumber]`, the
 count of due bills) after scheduled-transaction changes, as it does for edits
 in the app. `set_default_currency` was not exercised, to leave the ledger's

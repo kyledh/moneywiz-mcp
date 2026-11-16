@@ -179,7 +179,9 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
   window activation (traced across every write tool on build 466). The two
   dialogs MoneyWiz raises in reaction, "transfer succeeded" and "all payments
   of this scheduled transaction are done: delete or keep it?", are skipped.
-  MoneyWiz does refresh its Dock badge (the number of due bills).
+  MoneyWiz does refresh its Dock badge (the number of due bills). The
+  "following budgets are low / exceeded" warning is skipped for every write,
+  so check `list_budgets` after recording spending.
 * Writes wait while MoneyWiz has unsaved changes of its own and are refused if
   they persist for 5 seconds (an open editor), so a half-finished entry is
   never committed for you. Deletions that arrived from another device through

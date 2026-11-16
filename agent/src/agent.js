@@ -401,15 +401,34 @@ function inStore(e, o) {
 
 function uri(o) { return o.objectID().URIRepresentation().absoluteString().toString(); }
 
-// Split deletedObjects into those still in the store (real pending deletions)
-// and the URIs of those already gone.
+// MoneyWiz's own maintenance of its description-autocomplete history:
+// creating a history item schedules -[DataAccessor purge1YearOldStringHistoryItems]
+// (performSelectorOnce:afterDelay:), which deletes year-old StringHistoryItems,
+// and with them their category links, without saving; the next save commits
+// it. Those deletions are not anyone's unsaved edit.
+function isHistoryUpkeep(o) {
+  const name = o.entity().name().toString();
+  if (name === 'StringHistoryItem') return true;
+  if (name !== 'CategoryAssigment') return false;
+  const keys = ['stringHistoryItem', 'transaction', 'scheduledTransacition'];
+  const props = o.entity().propertiesByName();
+  if (keys.some(k => isNil(props.objectForKey_(nsString(k))))) return false;
+  const committed = o.committedValuesForKeys_(arrayOf(keys.map(nsString)));
+  const was = k => { const v = committed.objectForKey_(nsString(k)); return !isNil(v) && !kindOf(v, C.NSNull); };
+  return was('stringHistoryItem') && !was('transaction') && !was('scheduledTransacition');
+}
+
+// Split deletedObjects into real pending deletions, and the URIs of those that
+// are already gone from the store or are history upkeep (see above).
 function splitDeleted(e) {
   const array = e.context.deletedObjects().allObjects(), n = Number(array.count()), live = [], gone = new Set();
+  let upkeep = 0;
   for (let i = 0; i < n; i++) {
     const o = array.objectAtIndex_(i);
+    if (n <= MAX_STORE_CHECKS * 10 && isHistoryUpkeep(o)) { gone.add(uri(o)); upkeep++; continue; }
     if (n > MAX_STORE_CHECKS || inStore(e, o)) live.push(o); else gone.add(uri(o));
   }
-  return { live, gone };
+  return { live, gone, upkeep };
 }
 
 function members(value) {
@@ -457,9 +476,10 @@ function arrayOf(objects) {
 
 function contextState(e, detail = false) {
   const inserted = e.context.insertedObjects(), updated = e.context.updatedObjects();
-  const { live, gone } = splitDeleted(e), real = realUpdates(e, gone);
+  const { live, gone, upkeep } = splitDeleted(e), real = realUpdates(e, gone);
   const out = { has_changes: Boolean(e.context.hasChanges()), inserted: Number(inserted.count()), updated: Number(updated.count()),
-    updated_with_values: real.length, deleted: live.length, already_deleted_in_store: gone.size };
+    updated_with_values: real.length, deleted: live.length, already_deleted_in_store: gone.size - upkeep,
+    history_upkeep: upkeep };
   out.pending = out.inserted + out.deleted + out.updated_with_values;
   if (detail) out.detail = { inserted: changeSummary(inserted), updated: changeSummary(C.NSSet.setWithArray_(arrayOf(real))),
     deleted: changeSummary(C.NSSet.setWithArray_(arrayOf(live))) };

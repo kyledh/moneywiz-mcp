@@ -52,8 +52,11 @@ def test_other_errors_are_not_retried():
 
 
 def test_quiet_handlers_travel_with_the_call():
+    always = [list(h) for h in native.ALWAYS_QUIET]
     n = Scripted([{"value": 1}])
     n.invoke("manager", "saveData", [], encoding="B16@0:8", quiet=(("SomeController", "onThing:"),))
-    assert n.last[0]["quiet"] == [["SomeController", "onThing:"]]
+    assert n.last[0]["quiet"] == [["SomeController", "onThing:"], *always]
     n.invoke("manager", "saveData", [], encoding="B16@0:8")
+    assert n.last[0]["quiet"] == always, "every saving call skips the budget warning alert"
+    n.invoke("manager", "saveData", [], encoding="B16@0:8", save=False)
     assert "quiet" not in n.last[0]
