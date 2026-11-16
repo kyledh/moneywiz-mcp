@@ -164,7 +164,9 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
   dialog MoneyWiz raises in reaction, "transfer succeeded", is skipped.
 * Writes wait while MoneyWiz has unsaved changes of its own and are refused if
   they persist for 5 seconds (an open editor), so a half-finished entry is
-  never committed for you.
+  never committed for you. Deletions that arrived from another device through
+  iCloud, which MoneyWiz holds unsaved although they are already stored, do
+  not count.
 * Deleting an account deletes its transactions, so the tool refuses unless you
   pass the exact transaction count it reports. Archiving is usually better.
 * Deleting a category also deletes its subcategories; transactions that used

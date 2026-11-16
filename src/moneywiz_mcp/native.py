@@ -173,6 +173,17 @@ class Native:
     def save(self) -> dict:
         return self._call("save")
 
+    def settle(self, allow: list[tuple[str, str]], wait: float = 1.0) -> dict:
+        """Save MoneyWiz's own unsaved follow-up of our last call, but only if
+        every pending object is one of `allow` ([entity, gid]). Waits up to
+        `wait` seconds for it to appear; anything else pending is left alone."""
+        deadline = time.monotonic() + wait
+        while True:
+            result = self._call("settle", [list(a) for a in allow])
+            if result.get("saved") or result.get("others") or time.monotonic() >= deadline:
+                return result
+            time.sleep(0.1)
+
     def methods(self, class_name: str, needle: str = "") -> list:
         return self._call("methods", class_name, needle)
 

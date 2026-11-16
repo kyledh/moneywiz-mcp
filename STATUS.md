@@ -56,12 +56,20 @@ iCloud sync stay with MoneyWiz.
 * Attaching needs the one-time permission setup in the README.
 * A write waits up to 5 seconds for MoneyWiz's own unsaved changes to clear
   (it briefly holds a temporary report after every data change) and is
-  refused if they remain, for example while an editor is open.
+  refused if they remain, for example while an editor is open. Deletions
+  merged in from an iCloud import (already stored, but held unsaved by the
+  main context, together with the related objects' relationships they
+  shortened) do not count; this was verified with a sandbox probe that deletes
+  through a second context and merges the change the way imports do.
 * MoneyWiz answers each new transfer with a "transfer succeeded" dialog from
   `-[iphoneMoneyWizViewController onTransactionCreated:]`, which runs inside the
   create call and does nothing else. The server skips that observer for its own
   transfer calls only. If a MoneyWiz update renames it, the dialog comes back
   (and blocks quitting the app until dismissed); writes are unaffected.
+* Several MCP clients may be attached at once (say hermes and Claude). The
+  dialog suppression patches nothing between calls; 0.1.1–0.1.2 kept a code
+  patch in place, and two clients unloading in the wrong order crashed
+  MoneyWiz.
 * Saved locally is not synced; MoneyWiz uploads to iCloud on its own schedule.
 * Several calls are not atomic: each business call saves independently.
 * Only build 466's `MoneyWizManager` signatures are recorded. On another build,

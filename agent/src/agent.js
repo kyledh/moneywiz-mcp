@@ -380,22 +380,99 @@ function changeSummary(set) {
   return out;
 }
 
+
+// Whether a deleted object's row is still in the store. Merging another
+// context's save (an iCloud import) invokes delete: on the objects it removed,
+// so they sit in deletedObjects although the store no longer has them; saving
+// them changes nothing. Anything uncertain counts as still stored.
+const MAX_STORE_CHECKS = 200;
+function inStore(e, o) {
+  const id = o.objectID();
+  if (id.isTemporaryID()) return true;
+  const request = C.NSFetchRequest.alloc().init().autorelease();
+  request.setEntity_(o.entity());
+  request.setIncludesPendingChanges_(false);
+  request.setPredicate_(C.NSComparisonPredicate.predicateWithLeftExpression_rightExpression_modifier_type_options_(
+    C.NSExpression.expressionForEvaluatedObject(), C.NSExpression.expressionForConstantValue_(id), 0, 4, 0));
+  const error = Memory.alloc(Process.pointerSize).writePointer(NULL);
+  const n = Number(e.context.countForFetchRequest_error_(request, error));
+  return !(n === 0 && error.readPointer().isNull());
+}
+
+function uri(o) { return o.objectID().URIRepresentation().absoluteString().toString(); }
+
+// Split deletedObjects into those still in the store (real pending deletions)
+// and the URIs of those already gone.
+function splitDeleted(e) {
+  const array = e.context.deletedObjects().allObjects(), n = Number(array.count()), live = [], gone = new Set();
+  for (let i = 0; i < n; i++) {
+    const o = array.objectAtIndex_(i);
+    if (n > MAX_STORE_CHECKS || inStore(e, o)) live.push(o); else gone.add(uri(o));
+  }
+  return { live, gone };
+}
+
+function members(value) {
+  if (isNil(value) || kindOf(value, C.NSNull)) return [];
+  const array = kindOf(value, C.NSSet) ? value.allObjects() : kindOf(value, C.NSOrderedSet) ? value.array() : value;
+  const out = [];
+  for (let i = 0; i < Number(array.count()); i++) out.push(uri(array.objectAtIndex_(i)));
+  return out;
+}
+
+// The same merge also drops the deleted rows from related objects' loaded
+// relationships, which marks those objects updated. Such an object is only
+// merge residue when every change is a relationship losing members that are
+// already gone from the store; any attribute change or added member is real.
+function isResidue(o, gone) {
+  if (gone.size === 0) return false;
+  const changed = o.changedValues(), keys = changed.allKeys(), relationships = o.entity().relationshipsByName();
+  const committed = o.committedValuesForKeys_(keys);
+  for (let i = 0; i < Number(keys.count()); i++) {
+    const key = keys.objectAtIndex_(i), relationship = relationships.objectForKey_(key);
+    if (isNil(relationship)) return false;
+    const now = members(changed.objectForKey_(key)), before = members(committed.objectForKey_(key));
+    if (now.some(u => !before.includes(u))) return false;
+    if (before.some(u => !now.includes(u) && !gone.has(u))) return false;
+  }
+  return true;
+}
+
 // Objects can be registered as updated without any value change (MoneyWiz
-// touches investment holdings at launch). Only real edits count as pending.
-function changedCount(set) {
-  const array = set.allObjects(), n = Number(array.count());
-  let changed = 0;
-  for (let i = 0; i < n; i++) if (Number(array.objectAtIndex_(i).changedValues().count()) > 0) changed++;
-  return changed;
+// touches investment holdings at launch); only real edits count.
+function realUpdates(e, gone) {
+  const array = e.context.updatedObjects().allObjects(), out = [];
+  for (let i = 0; i < Number(array.count()); i++) {
+    const o = array.objectAtIndex_(i);
+    if (Number(o.changedValues().count()) > 0 && !isResidue(o, gone)) out.push(o);
+  }
+  return out;
+}
+
+function arrayOf(objects) {
+  const m = C.NSMutableArray.array();
+  for (const o of objects) m.addObject_(o);
+  return m;
 }
 
 function contextState(e, detail = false) {
-  const inserted = e.context.insertedObjects(), updated = e.context.updatedObjects(), deleted = e.context.deletedObjects();
+  const inserted = e.context.insertedObjects(), updated = e.context.updatedObjects();
+  const { live, gone } = splitDeleted(e), real = realUpdates(e, gone);
   const out = { has_changes: Boolean(e.context.hasChanges()), inserted: Number(inserted.count()), updated: Number(updated.count()),
-    updated_with_values: changedCount(updated), deleted: Number(deleted.count()) };
+    updated_with_values: real.length, deleted: live.length, already_deleted_in_store: gone.size };
   out.pending = out.inserted + out.deleted + out.updated_with_values;
-  if (detail) out.detail = { inserted: changeSummary(inserted), updated: changeSummary(updated), deleted: changeSummary(deleted) };
+  if (detail) out.detail = { inserted: changeSummary(inserted), updated: changeSummary(C.NSSet.setWithArray_(arrayOf(real))),
+    deleted: changeSummary(C.NSSet.setWithArray_(arrayOf(live))) };
   return out;
+}
+
+// The objects a save would actually write: inserted, really updated, and
+// deleted ones still in the store.
+function pendingObjects(e) {
+  const out = [], inserted = e.context.insertedObjects().allObjects();
+  for (let i = 0; i < Number(inserted.count()); i++) out.push(inserted.objectAtIndex_(i));
+  const { live, gone } = splitDeleted(e);
+  return out.concat(realUpdates(e, gone), live);
 }
 
 // A business method saves the whole context, so writing while the app holds
@@ -418,35 +495,27 @@ function requireClean(e, state) {
 // Some app observers do nothing but put up a dialog in reaction to a business
 // call (MoneyWiz answers every new transfer with a "transfer succeeded" alert).
 // A call may name such handlers in spec.quiet: each must be a void method with
-// one object argument, and it is skipped only while that call runs. Every
-// other invocation, including the app's own, goes through unchanged, and Frida
-// removes the replacement when the agent unloads.
-const quietHandlers = new Map(), quietActive = new Set();
-function quietHandler(className, selector) {
+// one object argument. For the duration of that call only, the method's
+// implementation is swapped for a no-op and then put back, all within the same
+// main-queue turn in which the observers run. Nothing stays patched between
+// calls, so several agents attached at once (two MCP clients) cannot leave one
+// another's code patches pointing into unloaded memory, which persistent
+// Interceptor patches did.
+const NOOP = new NativeCallback(() => {}, 'void', ['pointer', 'pointer', 'pointer']);
+
+function quietMethod(className, selector) {
   need(/^[A-Za-z_][A-Za-z0-9_]*$/.test(className) && /^[A-Za-z_][A-Za-z0-9_]*:$/.test(selector), 'Invalid quiet handler');
-  const key = `${className} ${selector}`;
-  if (!quietHandlers.has(key)) {
-    const k = C[className], method = k === undefined ? undefined : k['- ' + selector];
-    let installed = false;
-    if (method !== undefined && method.types === 'v24@0:8@16') {
-      const target = method.implementation;
-      const original = new NativeFunction(target, 'void', ['pointer', 'pointer', 'pointer']);
-      Interceptor.replace(target, new NativeCallback((self, cmd, arg) => {
-        if (!quietActive.has(key)) original(self, cmd, arg);
-      }, 'void', ['pointer', 'pointer', 'pointer']));
-      installed = true;
-    }
-    quietHandlers.set(key, installed);
-  }
-  return quietHandlers.get(key) ? key : null;
+  const k = C[className], method = k === undefined ? undefined : k['- ' + selector];
+  return method !== undefined && method.types === 'v24@0:8@16' ? method : null;
 }
 
 function quietly(spec, work) {
   need(spec.quiet === undefined || Array.isArray(spec.quiet), 'quiet must be a list');
   // A handler missing in this build only means its dialog is not suppressed.
-  const keys = (spec.quiet || []).map(([c, s]) => quietHandler(c, s)).filter(Boolean);
-  keys.forEach(k => quietActive.add(k));
-  try { return work(); } finally { keys.forEach(k => quietActive.delete(k)); }
+  const methods = (spec.quiet || []).map(([c, s]) => quietMethod(c, s)).filter(Boolean);
+  const saved = methods.map(m => m.implementation);
+  methods.forEach(m => { m.implementation = NOOP; });
+  try { return work(); } finally { methods.forEach((m, i) => { m.implementation = saved[i]; }); }
 }
 
 function save(e) {
@@ -525,6 +594,23 @@ rpc.exports = {
   },
 
   save() { return onMain(() => save(env())); },
+
+  // Save MoneyWiz's own follow-up of one of our calls (it prices a new forex
+  // position a moment after creating it, without saving), but only when every
+  // object a save would write is one the caller names. Anything else pending
+  // is left alone, as for any other write.
+  settle(allow) {
+    return onMain(() => {
+      const e = env();
+      need(Array.isArray(allow) && allow.every(a => Array.isArray(a) && a.length === 2), 'settle: [[entity, gid], ...]');
+      const allowed = new Set(allow.map(([entityName, gid]) => `${entityName} ${gid}`));
+      const objects = pendingObjects(e);
+      if (objects.length === 0) return { saved: false, pending: 0 };
+      const others = objects.filter(o => !allowed.has(`${o.entity().name()} ${ref(o).gid}`));
+      if (others.length) return { saved: false, pending: objects.length, others: others.length };
+      return save(e);
+    });
+  },
 
   methods(className, filter) {
     const k = C[className];

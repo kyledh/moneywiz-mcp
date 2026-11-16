@@ -49,12 +49,22 @@
    `MWPortfolioStoryModel` inserts a `CustomReport` to compute the portfolio
    overview and deletes it about a second later. The agent refuses before
    calling anything, with a named error, and `native.py` waits up to 5 s for
-   the context to clear; an editor left open is still reported.
+   the context to clear; an editor left open is still reported. Merging an
+   iCloud import calls `delete:` on the main context's copies of the rows it
+   removed, so they sit in `deletedObjects` although the store no longer has
+   them (checked with a fetch that ignores pending changes), and related
+   objects show those members missing from loaded relationships. Neither
+   counts: saving them changes nothing. When MoneyWiz follows one of our calls
+   with an unsaved change of its own (pricing a new forex position), `settle`
+   saves it only if every object a save would write is one the caller names.
 10. **Silence only the dialogs our own calls raise.** A call may name an app
    observer that does nothing but present UI (the "transfer succeeded" alert).
-   The agent replaces that method once with a pass-through and skips it only
-   while that call runs on the main queue. The app's own calls are untouched,
-   and Frida restores the method when the agent unloads.
+   For that call only, the agent swaps the method's implementation for a
+   no-op and puts the original back before the main-queue turn ends; the
+   observers run inside the business call, so they are skipped, and the
+   app's own calls are untouched. Nothing stays patched between calls: a
+   persistent code patch (as in 0.1.1–0.1.2) crashed MoneyWiz when two
+   clients were attached and unloaded in the wrong order.
 11. **Ship only what works.** A business call that cannot be completed reliably
    (for example share exchanges, see STATUS.md) is left out rather than exposed
    with caveats or kept as unused machinery.
