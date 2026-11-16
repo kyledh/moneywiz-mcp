@@ -67,8 +67,9 @@ iCloud sync stay with MoneyWiz.
   shortened) do not count; this was verified with a sandbox probe that deletes
   through a second context and merges the change the way imports do.
 * After a forex balance adjustment creates a currency position, MoneyWiz
-  prices it a moment later without saving. The server saves that change, and
-  only when nothing else is pending.
+  prices it without saving, once its main queue is free (seconds later while
+  it is busy uploading to iCloud). The server waits up to 15 seconds for that
+  change and saves it, and only when nothing else is pending.
 * MoneyWiz answers each new transfer with a "transfer succeeded" dialog from
   `-[iphoneMoneyWizViewController onTransactionCreated:]`, which runs inside the
   create call and does nothing else. The server skips that observer for its own
