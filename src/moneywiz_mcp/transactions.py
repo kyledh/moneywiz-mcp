@@ -34,13 +34,16 @@ FIELDS = ["date", "amount", "desc", "notes", "status", "reconciled", "voidCheque
           "originalAmount", "originalCurrency", "originalExchangeRate", "fee", "originalFee", "originalFeeCurrency",
           "numberOfShares", "pricePerShare", "symbol",
           "account.GID", "account.name", "account.currencyName", "payee.GID", "payee.name",
-          "tags.GID", "tags.name", "images.GID",
+          "tags.GID", "tags.name", "exchangeRate",
           "categoriesAssigments.amount", "categoriesAssigments.category.GID", "categoriesAssigments.category.name",
           "recipientAccount.GID", "recipientAccount.name", "recipientTransaction.GID", "recipientTransaction.amount",
           "senderTransaction.GID", "senderTransaction.account.GID", "senderTransaction.account.name",
           "investmentHolding.GID", "investmentHolding.symbol",
           "withdrawTransactionsLinks.withdrawTransaction.GID", "refundTransactionsLinks.refundTransaction.GID",
-          "reconcileAmount", "reconcileNumberOfShares"]
+          "reconcileAmount", "reconcileNumberOfShares",
+          "images.sortOrder", "images.imageAbsolutePath", "images.receiptAsset.originalFileName",
+          "images.receiptAsset.mimeType", "images.receiptAsset.byteSize",
+          "budgetFrom.GID", "budgetFrom.name", "budgetTo.GID", "budgetTo.name"]
 
 CREATE_EXPENSE = ("createWithdrawTransactionForAccount:GID:description:payeeName:originalCurrency:originalAmount:"
                   "originalExchangeRate:amount:fee:date:categories:categoriesMoney:checkbookNumber:imagesPaths:notes:"
@@ -68,6 +71,16 @@ EDIT_TRANSFER = ("editTransferWithdrawTransaction:fromAccount:toAccount:descript
                  "exchangeRate:toAmount:toAmountCurrency:fee:feeCurrency:date:receiveDate:categories:categoriesMoney:"
                  "payeeName:imagesPaths:checkbookNumber:tagsNames:")
 DELETE = "deleteTransactionWithBalanceRecalculation:notifyAccountsBalanceChange:"
+EDIT_BUDGET_TRANSFER = ("editTransferBudgetTransaction:fromBudget:toBudget:description:notes:amount:exchangeRate:fee:date:"
+                        "imagesPaths:tagsNames:")
+_SPLIT_TAIL = ("description:payeeName:originalCurrency:originalExchangeRate:originalAmount:amount:amountCurrency:fee:date:"
+              "categories:categoriesMoney:checkbookNumber:imagesPaths:notes:tagsNames:investmentSymbol:symbol:numberOfShares:")
+CREATE_SPLIT = {"expense": "createSplitedWithdrawTransactionForAccounts:accountsMoney:scheduledTransactionHandler:" + _SPLIT_TAIL,
+                "income": "createSplitedDepositTransactionForAccounts:accountsMoney:scheduledTransactionHandler:" + _SPLIT_TAIL,
+                "refund": "createSplitedRefundTransactionForAccounts:accountsMoney:withdrawTransaction:" + _SPLIT_TAIL}
+ADD_IMAGES = "addImagesAtPaths:toTransaction:"
+SET_IMAGES = "setImagesAtPaths:toTransaction:"
+MAX_ATTACHMENT = 25 * 1024 * 1024
 # MoneyWiz's "adjust balance": it books the difference between the balance
 # given and its own running balance on that date. Forex accounts adjust one
 # currency position at a time.
@@ -84,6 +97,21 @@ def _ratio(numerator: Decimal, denominator: Decimal, what: str) -> Decimal:
     if denominator == 0:
         raise MoneyWizError(f"Cannot derive {what} from a zero amount; give the rate explicitly")
     return numerator / denominator
+
+
+def _images(row: dict) -> list[dict]:
+    """The transaction's attachments in MoneyWiz's order (sortOrder)."""
+    images = list(zip(row.get("images.sortOrder") or [], row.get("images.imageAbsolutePath") or [],
+                      row.get("images.receiptAsset.originalFileName") or [], row.get("images.receiptAsset.mimeType") or [],
+                      row.get("images.receiptAsset.byteSize") or [], strict=True))
+    return [{"sort": order, "path": path, "file_name": name, "mime_type": mime, "size": size}
+            for order, path, name, mime, size in sorted(images, key=lambda x: (x[0] is None, x[0] or 0))]
+
+
+def images_arg(row: dict) -> dict:
+    """The current attachments' paths. MoneyWiz's edit methods set the image list
+    to exactly what they are given, so an edit must pass these to keep them."""
+    return arr(s(x["path"]) for x in _images(row) if x["path"])
 
 
 def view(row: dict) -> dict:
@@ -111,7 +139,9 @@ def view(row: dict) -> dict:
         "categories": [{"id": cid, "name": name, "amount": stored(value)} for cid, name, value in categories] or None,
         "fee": stored(row.get("fee")) if row.get("fee") else None,
         "cheque_number": row.get("checkbookNumber") or None,
-        "attachments": len(row.get("images.GID") or []) or None,
+        "attachments": [clean({"index": index, "file_name": x["file_name"] or (x["path"] or "").rsplit("/", 1)[-1] or None,
+                               "mime_type": x["mime_type"], "size": x["size"]})
+                        for index, x in enumerate(_images(row))] or None,
     }
     if row.get("originalCurrency") and row.get("originalCurrency") != row.get("account.currencyName"):
         out["original"] = {"currency": row.get("originalCurrency"), "amount": stored(row.get("originalAmount")),
@@ -126,6 +156,9 @@ def view(row: dict) -> dict:
         out["transfer_from_id"] = row.get("senderTransaction.account.GID")
         out["transfer_from"] = row.get("senderTransaction.account.name")
         out["other_leg_id"] = row.get("senderTransaction.GID")
+    if kind == "budget_transfer":
+        out["from_budget_id"], out["from_budget"] = row.get("budgetFrom.GID"), row.get("budgetFrom.name")
+        out["to_budget_id"], out["to_budget"] = row.get("budgetTo.GID"), row.get("budgetTo.name")
     if kind == "refund":
         out["refund_of_ids"] = row.get("withdrawTransactionsLinks.withdrawTransaction.GID") or None
     if kind == "reconcile":
@@ -363,12 +396,14 @@ class Transactions:
         row = self._row(transaction_id)
         current = view(row)
         kind = current["kind"]
+        if kind == "budget_transfer":
+            return self._update_budget_transfer(row, current, changes)
         if kind not in EDITABLE:
             if kind == "reconcile":
                 raise MoneyWizError("A balance adjustment is not edited in place: delete it and call "
                                     "moneywiz_adjust_balance again (MoneyWiz's editor does the same)")
             raise MoneyWizError(f"{kind} transactions cannot be edited through this tool yet "
-                                "(investment trades use moneywiz_update_trade; budget transfers are read-only)")
+                                "(investment trades use moneywiz_update_trade)")
         allowed = {"amount", "date", "description", "memo", "payee", "categories", "tags", "fee", "cheque_number",
                    "account", "original_amount", "original_currency", "exchange_rate", "transfer_to",
                    "transfer_amount", "transfer_exchange_rate", "receive_date"}
@@ -425,7 +460,7 @@ class Transactions:
             args = [ref("Transaction", transaction_id), ref("Account", account["id"]), ref("Account", target["id"]),
                     s(description), s(memo), n(float(value)), s(account["currency"]), n(float(rate)),
                     n(float(received)), s(target["currency"]), n(float(fee_value)), s(account["currency"]),
-                    date(when), date(received_when), cats, monies, self._payee(payee), NIL, opt_s(cheque),
+                    date(when), date(received_when), cats, monies, self._payee(payee), images_arg(row), opt_s(cheque),
                     self._tags(tags)]
             self.n.invoke("manager", EDIT_TRANSFER, args, quiet=TRANSFER_NOTICE)
             return self.get(transaction_id)
@@ -443,7 +478,7 @@ class Transactions:
             original_amount = original_currency = exchange_rate = None
         currency, original, rate, _ = self._fx(fx_source, value, original_amount, original_currency, exchange_rate)
         cats, monies, _ = self._splits(categories, value)
-        tail = [cats, monies, opt_s(cheque), NIL, s(memo), self._tags(tags), NIL, NIL, NIL]
+        tail = [cats, monies, opt_s(cheque), images_arg(row), s(memo), self._tags(tags), NIL, NIL, NIL]
         if kind == "expense":
             args = [ref("Transaction", transaction_id), ref("Account", account["id"]), s(description),
                     self._payee(payee), currency, rate, original, n(float(value)), s(account["currency"]),
@@ -498,6 +533,112 @@ class Transactions:
         created = self._created(result, "reconcile")
         return {"transaction": created, "account_balance": self.accounts.get(target["id"])["balance"]}
 
+    def _update_budget_transfer(self, row: dict, current: dict, changes: dict) -> dict:
+        unknown = set(changes) - {"amount", "date", "description", "memo", "exchange_rate", "tags"}
+        if unknown:
+            raise MoneyWizError(f"A budget transfer takes amount, date, description, memo, exchange_rate and tags; "
+                                f"not {sorted(unknown)}")
+        if not row.get("budgetFrom.GID") or not row.get("budgetTo.GID"):
+            raise MoneyWizError("This budget transfer has lost one of its budgets")
+        value = amount(changes["amount"], field="amount") if "amount" in changes else abs(Decimal(current["amount"]))
+        rate = amount(changes["exchange_rate"], field="exchange_rate") if "exchange_rate" in changes \
+            else Decimal(stored(row.get("exchangeRate")) or 1)
+        when = parse_when(changes["date"]) if changes.get("date") else parse_when(current["date"])
+        args = [ref("Transaction", row["gid"]), ref("Budget", row["budgetFrom.GID"]), ref("Budget", row["budgetTo.GID"]),
+                s(changes.get("description", current.get("description") or "")),
+                s(changes.get("memo", current.get("memo") or "")), n(float(value)), n(float(rate)),
+                n(float(row.get("fee") or 0)), date(when), images_arg(row), self._tags(changes.get("tags", current.get("tags")))]
+        self.n.invoke("manager", EDIT_BUDGET_TRANSFER, args)
+        return self.get(row["gid"])
+
+    # ------------------------------------------------------------ split across accounts
+
+    def create_split(self, *, kind: str, parts: list, date_: str, description: str = "", memo: str = "",
+                     payee: str | None = None, categories=None, tags=None, currency: str | None = None,
+                     refund_of: str | None = None, cheque_number: str | None = None) -> list[dict]:
+        """One purchase (or income, or refund) paid from several accounts, as MoneyWiz's
+        editor does with several accounts selected: one ordinary transaction per account."""
+        if kind not in CREATE_SPLIT:
+            raise MoneyWizError("kind must be expense, income or refund")
+        if not isinstance(parts, list) or len(parts) < 2 or not all(isinstance(p, dict) for p in parts):
+            raise MoneyWizError('parts: two or more {"account": ..., "amount": "12.00"} entries')
+        accounts = [self.accounts.resolve(p.get("account")) for p in parts]
+        if len({a["id"] for a in accounts}) != len(accounts):
+            raise MoneyWizError("Each account may appear once in parts")
+        values = [amount(p.get("amount"), field="part amount") for p in parts]
+        total = sum(values, Decimal(0))
+        code = currency_code(self.n, currency) if currency else accounts[0]["currency"]
+        cats, monies, _ = self._splits(categories, total)
+        head = [arr(ref("Account", a["id"]) for a in accounts), arr(n(float(v)) for v in values)]
+        if kind == "refund":
+            if not refund_of:
+                raise MoneyWizError("A refund needs refund_of: the id of the expense being refunded")
+            if ENTITY_KIND.get(self._row(refund_of)["$ref"]) != "expense":
+                raise MoneyWizError("refund_of must be the id of an expense transaction")
+            head.append(ref("Transaction", refund_of))
+        else:
+            head.append(NIL)  # no scheduled transaction
+        args = head + [s(description or ""), self._payee(payee), s(code), n(1.0), n(float(total)), n(float(total)),
+                       s(code), n(0.0), date(parse_when(date_)), cats, monies, opt_s(cheque_number), NIL, s(memo or ""),
+                       self._tags(tags), NIL, NIL, NIL]
+        created = self.n.invoke("manager", CREATE_SPLIT[kind], args)["value"] or []
+        if not isinstance(created, list) or len(created) != len(parts):
+            raise MoneyWizError("MoneyWiz did not create one transaction per account")
+        return [self.get(x["gid"]) for x in created]
+
+    # ------------------------------------------------------------ attachments
+
+    def add_attachment(self, transaction_id: str, file_path: str) -> dict:
+        """Attach a receipt (image or PDF) as MoneyWiz does: it copies the file into its
+        images folder, sizes it per its receipt setting and syncs it through iCloud."""
+        import base64
+        import os
+        import re
+        self._row(transaction_id)
+        path = os.path.expanduser(file_path or "")
+        if not os.path.isfile(path):
+            raise MoneyWizError(f"No such file: {file_path!r}")
+        if os.path.getsize(path) > MAX_ATTACHMENT:
+            raise MoneyWizError("The file is larger than 25 MB")
+        with open(path, "rb") as handle:
+            payload = base64.b64encode(handle.read()).decode()
+        name = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(path))[-120:] or "receipt"
+        staged = self.n.stage_file(name, payload)
+        try:
+            self.n.invoke("manager", ADD_IMAGES, [arr([s(staged)]), ref("Transaction", transaction_id)])
+        finally:
+            self.n.unstage_file(staged)
+        return self.get(transaction_id)
+
+    def get_attachment(self, transaction_id: str, index: int = 0, save_to: str | None = None) -> dict:
+        import base64
+        import os
+        import tempfile
+        self._row(transaction_id)
+        found = self.n.attachment(transaction_id, int(index))
+        if not found.get("local"):
+            return clean({"index": index, "local": False, "file_name": found.get("originalFileName"),
+                          "note": "MoneyWiz has not downloaded this attachment from iCloud yet"})
+        name = found.get("originalFileName") or (found.get("path") or "").rsplit("/", 1)[-1] or f"attachment-{index}"
+        if save_to:
+            target = os.path.expanduser(save_to)
+            if os.path.isdir(target):
+                target = os.path.join(target, name)
+        else:
+            target = os.path.join(tempfile.mkdtemp(prefix="moneywiz-attachment-"), name)
+        with open(target, "wb") as handle:
+            handle.write(base64.b64decode(found["base64"]))
+        return clean({"index": index, "saved_to": target, "size": found.get("size"),
+                      "mime_type": found.get("mimeType"), "file_name": name})
+
+    def remove_attachment(self, transaction_id: str, index: int) -> dict:
+        images = _images(self._row(transaction_id))
+        if not isinstance(index, int) or not 0 <= index < len(images):
+            raise MoneyWizError(f"index must be between 0 and {len(images) - 1}" if images else "There are no attachments")
+        keep = [x["path"] for i, x in enumerate(images) if i != index and x["path"]]
+        self.n.invoke("manager", SET_IMAGES, [arr(s(p) for p in keep), ref("Transaction", transaction_id)])
+        return self.get(transaction_id)
+
     # ------------------------------------------------------------ state & delete
 
     def set_status(self, transaction_id: str, status: str) -> dict:
@@ -524,6 +665,8 @@ class Transactions:
         removed = [transaction_id]
         if current.get("other_leg_id"):
             removed.append(current["other_leg_id"])
+        # MoneyWiz deletes an expense's refunds with it.
+        removed += [x for x in current.get("refunded_by_ids") or [] if x not in removed]
         self.n.invoke("manager", DELETE, [ref("Transaction", transaction_id), b(True)])
         still = [x for x in removed if self.n.get("Transaction", x)]
         if still:

@@ -44,6 +44,9 @@ class Native:
         self._pid = None
         self._stale = False
         self._launch = launch
+        # What muted observers were told during calls (see agent.js), so a tool
+        # can report it; read with take_notices().
+        self.notices: list[dict] = []
 
     # ---------------------------------------------------------------- connection
 
@@ -177,7 +180,13 @@ class Native:
                 raise MoneyWizError(f"Unknown MoneyWizManager selector {selector}")
         if encoding:
             spec["encoding"] = encoding
-        return decode(self._write("invoke", spec))
+        result = decode(self._write("invoke", spec))
+        self.notices.extend(result.pop("notices", None) or [])
+        return result
+
+    def take_notices(self) -> list[dict]:
+        notices, self.notices = self.notices, []
+        return notices
 
     def save(self) -> dict:
         return self._call("save")
@@ -192,6 +201,16 @@ class Native:
             if result.get("saved") or result.get("others") or time.monotonic() >= deadline:
                 return result
             time.sleep(0.1)
+
+    # Attachments: MoneyWiz is sandboxed, so files travel as bytes (see agent.js).
+    def stage_file(self, name: str, base64_data: str) -> str:
+        return self._call("stageFile", name, base64_data)
+
+    def unstage_file(self, path: str) -> bool:
+        return self._call("unstageFile", path)
+
+    def attachment(self, transaction_id: str, index: int) -> dict:
+        return self._call("attachment", transaction_id, index)
 
     def methods(self, class_name: str, needle: str = "") -> list:
         return self._call("methods", class_name, needle)

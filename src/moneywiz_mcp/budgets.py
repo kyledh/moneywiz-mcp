@@ -326,6 +326,34 @@ class Budgets:
         return {r["gid"]: (r.get("groupID"), r.get("displayOrder"))
                 for r in self.n.query("Budget", fields=["groupID", "displayOrder"])["items"]}
 
+    def _place(self, entity: str, ordered_ids: list[str], notification: str):
+        """Number objects 0..n in this order with the call MoneyWiz's own reorder
+        uses (updateBudget:withDisplayOrder:andGroup: and normilizeBudgetsDisplayOrders)."""
+        siblings = arr(ref(entity, x) for x in ordered_ids)
+        for index, object_id in enumerate(ordered_ids):
+            self.n.invoke("manager", "updateObject:withDisplayOrderIndex:siblings:notificationName:user:",
+                          [ref(entity, object_id), i(index), siblings, s(notification), USER])
+
+    def reorder(self, ordered: list[str], group=None) -> list[dict]:
+        """Set the order of the budgets in one group (or the ungrouped ones)."""
+        group_id = self.group(group)["group_id"] if group not in (None, "") else None
+        def member(row):
+            stored = row.get("groupID")
+            return stored == group_id if group_id is not None else stored in (None, 0, -1)
+        members = [r["gid"] for r in self._rows() if member(r)]
+        ids = [self.resolve(x)["gid"] for x in ordered]
+        if sorted(ids) != sorted(members):
+            raise MoneyWizError("Give every budget of that group exactly once (see moneywiz_list_budget_groups)")
+        self._place("Budget", ids, "Budget display order changed")
+        return [self.get(x) for x in ids]
+
+    def reorder_groups(self, ordered: list[str]) -> list[dict]:
+        ids = [self.group(x)["id"] for x in ordered]
+        if sorted(ids) != sorted(g["id"] for g in self.groups()):
+            raise MoneyWizError("Give every budget group exactly once")
+        self._place("Group", ids, "Group changed")
+        return self.groups()
+
     def delete(self, budget_ref: str) -> dict:
         row = self.resolve(budget_ref)
         before = self._orders()
@@ -341,12 +369,8 @@ class Budgets:
             members = sorted((o, gid) for gid, (g, o) in before.items() if g == group_id and gid in after)
             if all(after[gid][1] == o for o, gid in members):
                 continue
-            siblings = arr(ref("Budget", gid) for _, gid in members)
-            for index, (_, gid) in enumerate(members):
-                # What updateBudget:withDisplayOrder:andGroup: calls for a drag in the app.
-                self.n.invoke("manager", "updateObject:withDisplayOrderIndex:siblings:notificationName:user:",
-                              [ref("Budget", gid), i(index), siblings, s("Budget display order changed"), USER])
-                restored += 1
+            self._place("Budget", [gid for _, gid in members], "Budget display order changed")
+            restored += len(members)
         return clean({"deleted": row["gid"], "name": row.get("name"), "reordered_back": restored or None})
 
     def transfer(self, *, from_budget: str, to_budget: str, amount_, date_: str, description: str = "",

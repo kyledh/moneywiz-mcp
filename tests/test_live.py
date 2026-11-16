@@ -7,6 +7,8 @@ prefix and removed again, including on failure.
 from __future__ import annotations
 
 import os
+import struct
+import zlib
 from decimal import Decimal
 
 import pytest
@@ -48,10 +50,12 @@ def cleanup(native: Native):
     drop_budgets(native)
     for account in native.query("Account", where=[["name", "begins", s(SANDBOX)]], fields=["name"])["items"]:
         for row in native.query("Transaction", where=[["account.GID", "eq", s(account["gid"])]], fields=[])["items"]:
-            transactions.delete(row["gid"])
+            if native.get("Transaction", row["gid"]):  # a transfer's other leg, or an expense's refunds, may be gone
+                transactions.delete(row["gid"])
         accounts.delete(account["gid"])
     for row in native.query("Transaction", where=[["desc", "begins", s(SANDBOX)]], fields=[])["items"]:
-        transactions.delete(row["gid"])
+        if native.get("Transaction", row["gid"]):
+            transactions.delete(row["gid"])
     for holding in native.query("InvestmentHolding", where=[["symbol", "begins", s("MCPTEST")]], fields=["symbol"])["items"]:
         Investments(native).delete_holding(holding["gid"], delete_trades=True)
     for group in [g for g in accounts.groups() if g["name"].startswith(SANDBOX)]:
@@ -88,7 +92,8 @@ def live():
 
 def snapshot(native: Native) -> dict:
     return {entity: native.count(entity)
-            for entity in ("Account", "Transaction", "Category", "Payee", "Tag", "ScheduledTransactionHandler", "Budget")}
+            for entity in ("Account", "Transaction", "Category", "Payee", "Tag", "ScheduledTransactionHandler", "Budget",
+                           "Image")}
 
 
 def ordering(native: Native) -> dict:
@@ -653,3 +658,163 @@ def test_budget_lifecycle(live):
         catalog.delete("Category", category["id"])
         for tag in [x for x in catalog.tags() if x["name"].startswith(SANDBOX)]:
             catalog.delete("Tag", tag["id"])
+
+
+def _png(path, width, height, rgb):
+    """A small valid PNG to attach."""
+    rows = b"".join(b"\0" + bytes(rgb) * width for _ in range(height))
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+                     + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+    return path
+
+
+def test_attachments_survive_edits_and_go_with_the_transaction(live, tmp_path):
+    accounts, transactions, native = live["accounts"], live["transactions"], live["native"]
+    source = accounts.create(group_id=live["group"], name=SANDBOX + "RCPT", kind="cash", currency="CNY", opening_balance="50")
+    target = accounts.create(group_id=live["group"], name=SANDBOX + "RCPT2", kind="cash", currency="CNY")
+    first, second = _png(tmp_path / "a.png", 64, 48, (200, 30, 30)), _png(tmp_path / "b.png", 32, 32, (30, 30, 200))
+    try:
+        expense = transactions.create(account=source["id"], kind="expense", amount_="12", date_="2026-11-15",
+                                      description=SANDBOX + "receipt")
+        transactions.add_attachment(expense["id"], str(first))
+        attached = transactions.add_attachment(expense["id"], str(second))["attachments"]
+        assert [x["index"] for x in attached] == [0, 1]
+        saved = transactions.get_attachment(expense["id"], 0, save_to=str(tmp_path / "out.png"))
+        assert (tmp_path / "out.png").read_bytes() == first.read_bytes() and saved["size"] == first.stat().st_size
+        copies = [x["path"] for x in _images_of(native, expense["id"])]
+        assert all(os.path.exists(p) for p in copies)
+        # MoneyWiz's edit methods set the image list to what they are given; edits must keep it.
+        assert len(transactions.update(expense["id"], memo="edited")["attachments"]) == 2
+        left = transactions.remove_attachment(expense["id"], 0)["attachments"]
+        assert len(left) == 1 and not os.path.exists(copies[0])
+
+        transfer = transactions.create(account=source["id"], kind="transfer", amount_="5", date_="2026-11-15",
+                                       transfer_to=target["id"], description=SANDBOX + "rcpt-xfer")
+        transactions.add_attachment(transfer["id"], str(first))
+        edited = transactions.update(transfer["id"], memo="x")
+        assert edited["attachments"] and transactions.get(edited["other_leg_id"])["attachments"]
+
+        transactions.delete(expense["id"])
+        assert not os.path.exists(copies[1]), "MoneyWiz deletes its copy with the transaction"
+    finally:
+        for account in (source, target):
+            for row in _transactions_of(native, account["id"]):
+                if native.get("Transaction", row["gid"]):
+                    transactions.delete(row["gid"])
+            accounts.delete(account["id"])
+
+
+def _images_of(native, transaction_id):
+    from moneywiz_mcp.transactions import _images
+    return _images(native.get("Transaction", transaction_id, ["images.sortOrder", "images.imageAbsolutePath",
+                                                               "images.receiptAsset.originalFileName",
+                                                               "images.receiptAsset.mimeType",
+                                                               "images.receiptAsset.byteSize"]))
+
+
+def test_split_across_accounts_and_refunds_going_with_their_expense(live):
+    accounts, catalog, transactions, native = live["accounts"], live["catalog"], live["transactions"], live["native"]
+    one = accounts.create(group_id=live["group"], name=SANDBOX + "PAY1", kind="cash", currency="CNY", opening_balance="100")
+    two = accounts.create(group_id=live["group"], name=SANDBOX + "PAY2", kind="cash", currency="CNY", opening_balance="100")
+    category = catalog.create_category(SANDBOX + "SPLIT", "expense")
+    try:
+        parts = transactions.create_split(kind="expense", parts=[{"account": one["id"], "amount": "20"},
+                                                                 {"account": two["id"], "amount": "10"}],
+                                          date_="2026-11-15", description=SANDBOX + "split", categories=category["id"])
+        assert [(p["account_id"], p["amount"]) for p in parts] == [(one["id"], "-20"), (two["id"], "-10")]
+        assert [p["categories"][0]["amount"] for p in parts] == ["-20", "-10"], "the split follows each part"
+        income = transactions.create_split(kind="income", parts=[{"account": one["id"], "amount": "3"},
+                                                                 {"account": two["id"], "amount": "4"}],
+                                           date_="2026-11-15", description=SANDBOX + "split-in")
+        assert [p["amount"] for p in income] == ["3", "4"]
+        refunds = transactions.create_split(kind="refund", parts=[{"account": one["id"], "amount": "2"},
+                                                                  {"account": two["id"], "amount": "1"}],
+                                            date_="2026-11-16", description=SANDBOX + "split-ref", refund_of=parts[0]["id"])
+        assert all(r["refund_of_ids"] == [parts[0]["id"]] for r in refunds)
+        assert [accounts.get(x["id"])["balance"] for x in (one, two)] == ["85", "95"]
+        # MoneyWiz deletes an expense's refunds with it; the result says so.
+        removed = transactions.delete(parts[0]["id"])
+        assert set(removed["deleted"]) == {parts[0]["id"], refunds[0]["id"], refunds[1]["id"]}
+        with pytest.raises(MoneyWizError):
+            transactions.create_split(kind="expense", parts=[{"account": one["id"], "amount": "1"}], date_="2026-11-15")
+    finally:
+        for account in (one, two):
+            for row in _transactions_of(native, account["id"]):
+                if native.get("Transaction", row["gid"]):
+                    transactions.delete(row["gid"])
+            accounts.delete(account["id"])
+        catalog.delete("Category", category["id"])
+
+
+def test_budget_transfers_edits_order_and_warnings(live):
+    accounts, catalog, transactions, native = live["accounts"], live["catalog"], live["transactions"], live["native"]
+    budgets = Budgets(native)
+    account = accounts.create(group_id=live["group"], name=SANDBOX + "BUD", kind="cash", currency="CNY", opening_balance="500")
+    category = catalog.create_category(SANDBOX + "BUDCAT", "expense")
+    try:
+        first = budgets.create(name=SANDBOX + "ONE", amount_="100", categories=[category["id"]], accounts=[account["id"]],
+                               start_date="2026-11-01")
+        second = budgets.create(name=SANDBOX + "TWO", amount_="100", categories=[category["id"]], accounts=[account["id"]],
+                                start_date="2026-11-01")
+        moved = budgets.transfer(from_budget=first["id"], to_budget=second["id"], amount_="10", date_="2026-11-15",
+                                 description=SANDBOX + "bt")
+        edited = transactions.update(moved["transfer_id"], amount="15", memo="m")
+        assert edited["kind"] == "budget_transfer" and edited["amount"] == "15" and edited["from_budget_id"] == first["id"]
+        assert budgets.get(first["id"])["current_period"]["available"] == "85"
+        transactions.delete(moved["transfer_id"])
+
+        assert [b["id"] for b in budgets.reorder([second["id"], first["id"]])] == [second["id"], first["id"]]
+        assert budgets.get(second["id"])["display_order"] == 0 and budgets.get(first["id"])["display_order"] == 1
+
+        # Through the tool: MoneyWiz's own "exceeded" verdict comes back instead of an alert.
+        from moneywiz_mcp import server
+        try:
+            result = server.moneywiz_create_transaction(account=account["id"], kind="expense", amount="150",
+                                                        date="2026-11-16", categories=category["id"],
+                                                        description=SANDBOX + "big")
+        finally:
+            server.native.close()
+        assert {b["id"] for b in result["budget_warnings"]["exceeded"]} == {first["id"], second["id"]}
+    finally:
+        drop_budgets(native)
+        for row in _transactions_of(native, account["id"]):
+            if native.get("Transaction", row["gid"]):
+                transactions.delete(row["gid"])
+        accounts.delete(account["id"])
+        catalog.delete("Category", category["id"])
+
+
+def test_scheduled_transfer_categories_and_foreign_currency(live):
+    accounts, catalog, scheduled, transactions, native = (live["accounts"], live["catalog"], live["scheduled"],
+                                                          live["transactions"], live["native"])
+    source = accounts.create(group_id=live["group"], name=SANDBOX + "STC", kind="cash", currency="CNY", opening_balance="1000")
+    target = accounts.create(group_id=live["group"], name=SANDBOX + "STC2", kind="cash", currency="CNY")
+    category = catalog.create_category(SANDBOX + "STCAT", "expense")
+    try:
+        plain = transactions.create(account=source["id"], kind="transfer", amount_="7", date_="2026-11-15",
+                                    transfer_to=target["id"], categories=[{"category": category["id"], "amount": "7"}],
+                                    description=SANDBOX + "plain")
+        planned = scheduled.create(kind="transfer", account=source["id"], transfer_to=target["id"], amount_="7",
+                                   date_="2027-01-10", categories=[{"category": category["id"], "amount": "7"}],
+                                   description=SANDBOX + "planned")
+        done = scheduled.execute(planned["id"])["transaction"]
+        legs = lambda t: [t["categories"][0]["amount"], transactions.get(t["other_leg_id"])["categories"][0]["amount"]]
+        assert legs(done) == legs(plain) == ["-7", "7"], "a scheduled transfer records categories like a plain one"
+
+        usd = scheduled.create(kind="expense", account=source["id"], amount_="10", date_="2027-01-10", currency="USD",
+                               description=SANDBOX + "usd")
+        assert usd["currency"] == "USD" and usd["amount"] == "-10"
+        recorded = scheduled.execute(usd["id"])["transaction"]
+        assert recorded["currency"] == "CNY" and recorded["original"]["currency"] == "USD"
+        assert recorded["original"]["amount"] == "-10"
+        assert Decimal(recorded["amount"]) == Decimal(recorded["original"]["amount"]) * Decimal(recorded["original"]["exchange_rate"])
+    finally:
+        drop_scheduled(native)
+        for account in (source, target):
+            for row in _transactions_of(native, account["id"]):
+                if native.get("Transaction", row["gid"]):
+                    transactions.delete(row["gid"])
+            accounts.delete(account["id"])
+        catalog.delete("Category", category["id"])

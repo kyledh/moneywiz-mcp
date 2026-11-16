@@ -521,7 +521,24 @@ function requireClean(e, state) {
 // calls, so several agents attached at once (two MCP clients) cannot leave one
 // another's code patches pointing into unloaded memory, which persistent
 // Interceptor patches did.
-const NOOP = new NativeCallback(() => {}, 'void', ['pointer', 'pointer', 'pointer']);
+// The stand-in records what the observer was told (the notification's name and
+// object, e.g. the budgets MoneyWiz would warn about), so the caller can report
+// it. It must never throw back into MoneyWiz's frames.
+let captured = [];
+const MAX_NOTICES = 20;
+const MAX_ATTACHMENT = 25 * 1024 * 1024;
+const NSTemporaryDirectory = new NativeFunction(Module.getGlobalExportByName('NSTemporaryDirectory'), 'pointer', []);
+function stagingDir() { return new ObjC.Object(NSTemporaryDirectory()).toString().replace(/\/$/, '') + '/moneywiz-mcp'; }
+
+const NOOP = new NativeCallback((self, cmd, arg) => {
+  try {
+    if (captured.length >= MAX_NOTICES || arg.isNull()) return;
+    const note = new ObjC.Object(arg);
+    if (!kindOf(note, C.NSNotification)) return;
+    captured.push({ handler: `${new ObjC.Object(self).$className} ${ObjC.selectorAsString(cmd)}`,
+                    name: note.name().toString(), object: toJS(note.object()) });
+  } catch (e) { /* recording is best effort; the dialog is skipped either way */ }
+}, 'void', ['pointer', 'pointer', 'pointer']);
 
 function quietMethod(className, selector) {
   need(/^[A-Za-z_][A-Za-z0-9_]*$/.test(className) && /^[A-Za-z_][A-Za-z0-9_]*:$/.test(selector), 'Invalid quiet handler');
@@ -535,8 +552,11 @@ function quietly(spec, work) {
   const methods = (spec.quiet || []).map(([c, s]) => quietMethod(c, s)).filter(Boolean);
   const saved = methods.map(m => m.implementation);
   methods.forEach(m => { m.implementation = NOOP; });
+  captured = [];
   try { return work(); } finally { methods.forEach((m, i) => { m.implementation = saved[i]; }); }
 }
+
+function takeNotices() { const out = captured; captured = []; return out; }
 
 function save(e) {
   const before = contextState(e);
@@ -590,6 +610,8 @@ rpc.exports = {
       const value = quietly(spec, () => invokeOn(e, spec));
       const after = contextState(e);
       const out = { value, context_before: before, context_after: after };
+      const notices = takeNotices();
+      if (notices.length) out.notices = notices;
       if (spec.save && after.pending > 0) out.save = save(e);
       return out;
     });
@@ -614,6 +636,55 @@ rpc.exports = {
   },
 
   save() { return onMain(() => save(env())); },
+
+  // Attachments. MoneyWiz is sandboxed and cannot read the caller's files, so
+  // the server sends the bytes and the agent writes them into MoneyWiz's own
+  // temporary directory, where addImagesAtPaths:toTransaction: can copy them.
+  stageFile(name, base64) {
+    return onMain(() => {
+      need(typeof name === 'string' && /^[A-Za-z0-9._-]{1,120}$/.test(name), 'stageFile: plain file name');
+      need(typeof base64 === 'string' && base64.length <= MAX_ATTACHMENT * 4 / 3 + 4, 'stageFile: file too large');
+      const fm = C.NSFileManager.defaultManager(), dir = stagingDir();
+      fm.createDirectoryAtPath_withIntermediateDirectories_attributes_error_(nsString(dir), true, NULL, NULL);
+      const data = C.NSData.alloc().initWithBase64EncodedString_options_(nsString(base64), 0);
+      need(!isNil(data), 'stageFile: not base64');
+      const path = `${dir}/${Date.now()}-${name}`;
+      need(data.writeToFile_atomically_(nsString(path), true), 'stageFile: could not write into MoneyWiz\'s temporary directory');
+      return path;
+    });
+  },
+
+  unstageFile(path) {
+    return onMain(() => {
+      need(typeof path === 'string' && path.startsWith(stagingDir() + '/') && !path.includes('..'), 'unstageFile: not a staged file');
+      return Boolean(C.NSFileManager.defaultManager().removeItemAtPath_error_(nsString(path), NULL));
+    });
+  },
+
+  // Bytes of one attachment (images in sortOrder), from MoneyWiz's own copy.
+  attachment(gid, index) {
+    return onMain(() => {
+      const e = env(), tx = lookup(e, 'Transaction', gid);
+      need(Number.isSafeInteger(index) && index >= 0, 'attachment: index');
+      const sorted = tx.images().allObjects().sortedArrayUsingDescriptors_(C.NSArray.arrayWithObject_(
+        C.NSSortDescriptor.sortDescriptorWithKey_ascending_(nsString('sortOrder'), true)));
+      need(index < Number(sorted.count()), `attachment: the transaction has ${Number(sorted.count())} attachments`);
+      // imageData is a decoded UIImage; read the stored file itself.
+      const image = sorted.objectAtIndex_(index), path = image.imageAbsolutePath();
+      const data = isNil(path) ? null : C.NSData.dataWithContentsOfFile_(path);
+      const out = { index, path: isNil(path) ? null : path.toString(), local: !isNil(data) };
+      const asset = image.receiptAsset();
+      if (!isNil(asset)) {
+        for (const k of ['originalFileName', 'mimeType']) { const v = asset.valueForKey_(nsString(k)); if (!isNil(v)) out[k] = v.toString(); }
+      }
+      if (!isNil(data)) {
+        need(Number(data.length()) <= MAX_ATTACHMENT, 'attachment: too large to transfer');
+        out.size = Number(data.length());
+        out.base64 = data.base64EncodedStringWithOptions_(0).toString();
+      }
+      return out;
+    });
+  },
 
   // Save MoneyWiz's own follow-up of one of our calls (it prices a new forex
   // position a moment after creating it, without saving), but only when every

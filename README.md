@@ -99,20 +99,20 @@ and a ledger behind a passcode still has to be unlocked by hand.
 
 ## Tools
 
-65 tools, all prefixed `moneywiz_`:
+71 tools, all prefixed `moneywiz_`:
 
 | Area | Tools |
 | --- | --- |
 | Status | `status` |
 | Accounts | `list_accounts`, `get_account`, `create_account`, `update_account`, `archive_account`, `delete_account`, `move_account` |
 | Account groups | `list_account_groups`, `create_account_group`, `update_account_group`, `delete_account_group` |
-| Transactions | `list_transactions`, `get_transaction`, `create_transaction`, `update_transaction`, `set_transaction_status`, `delete_transaction`, `adjust_balance` |
+| Transactions | `list_transactions`, `get_transaction`, `create_transaction`, `update_transaction`, `set_transaction_status`, `delete_transaction`, `adjust_balance`, `create_split_transaction`, `add_attachment`, `get_attachment`, `remove_attachment` |
 | Categories, payees, tags | `list_categories`, `list_payees`, `list_tags`, `create_category`, `update_category`, `reorder_categories`, `create_payee`, `create_tag`, `rename_payee`, `rename_tag`, `delete_catalog_object`, `merge_catalog_objects`, `catalog_usage` |
 | Currencies | `currency_settings`, `net_worth`, `set_default_currency`, `get_exchange_rate`, `set_exchange_rate`, `clear_exchange_rate`, `set_display_currencies` |
 | Investments | `list_holdings`, `trade`, `update_trade`, `delete_trade`, `create_holding`, `delete_holding`, `set_holding_price`, `set_holding_shares`, `set_holding_cost_basis` |
 | Loans | `list_loans`, `loan_schedule` |
 | Scheduled transactions | `list_scheduled`, `create_scheduled`, `update_scheduled`, `delete_scheduled`, `skip_scheduled`, `execute_scheduled` |
-| Budgets | `list_budgets`, `create_budget`, `update_budget`, `delete_budget`, `transfer_between_budgets`, `list_budget_groups`, `create_budget_group`, `update_budget_group`, `delete_budget_group` |
+| Budgets | `list_budgets`, `create_budget`, `update_budget`, `delete_budget`, `transfer_between_budgets`, `list_budget_groups`, `create_budget_group`, `update_budget_group`, `delete_budget_group`, `reorder_budgets`, `reorder_budget_groups` |
 
 What is and is not covered yet is listed in [STATUS.md](STATUS.md).
 
@@ -147,6 +147,16 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
   symbol you do not hold opens a short position (negative shares), and a later
   buy covers it. A negative commission is a rebate: a buy then costs
   `shares x price - rebate`.
+* **Several accounts** (`create_split_transaction`): one purchase, income or
+  refund paid from several accounts becomes one ordinary transaction per
+  account, as in MoneyWiz's editor with several accounts selected; the
+  category split follows each part. MoneyWiz does not link the parts, so
+  each is edited or deleted on its own.
+* **Attachments** (receipts): `add_attachment` takes a file on this Mac (up to
+  25 MB); MoneyWiz keeps its own copy, sized per its receipt setting, and
+  syncs it through iCloud. `get_transaction` lists them and `get_attachment`
+  writes one to a file. Edits keep them, and deleting the transaction deletes
+  them.
 * **Balance adjustments** (`adjust_balance`) are MoneyWiz's "adjust balance":
   give the balance a statement shows on a date and MoneyWiz books the
   difference from its own running balance as a reconcile transaction. A bare
@@ -190,8 +200,9 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
   dialogs MoneyWiz raises in reaction, "transfer succeeded" and "all payments
   of this scheduled transaction are done: delete or keep it?", are skipped.
   MoneyWiz does refresh its Dock badge (the number of due bills). The
-  "following budgets are low / exceeded" warning is skipped for every write,
-  so check `list_budgets` after recording spending.
+  "following budgets are low / exceeded" warning is skipped for every write;
+  its verdict comes back as `budget_warnings` (`low`, `exceeded`) in the
+  tool's result instead.
 * Writes wait while MoneyWiz has unsaved changes of its own and are refused if
   they persist for 5 seconds (an open editor), so a half-finished entry is
   never committed for you. Deletions that arrived from another device through

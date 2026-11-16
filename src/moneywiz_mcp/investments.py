@@ -8,7 +8,7 @@ from __future__ import annotations
 from .accounts import Accounts
 from .native import Native, MoneyWizError, s, d, b, i, ref, date, opt_s, NIL
 from .portfolio import Portfolio
-from .transactions import Transactions
+from .transactions import Transactions, images_arg
 from .values import amount, parse_when
 
 BUY = ("buyInvestmentsShares:transactionGID:desc:assetClass:holdingType:cusip:date:sharesSymbol:numberOfShares:"
@@ -141,11 +141,12 @@ class Investments:
         fee = amount(changes.get("commission", current.get("fee") or 0), field="commission")
         when = parse_when(changes["date"]) if changes.get("date") else parse_when(current["date"])
         holding = self._holding_of(account["id"], symbol) or {}
+        row = self.transactions._row(transaction_id)
         self.n.invoke("manager", selector,
                       [ref("Transaction", transaction_id), ref("Account", account["id"]),
                        s(changes.get("description", current.get("description") or symbol)), s(""),
                        s(holding.get("type") or ""), s(""), date(when), s(symbol),
-                       d(float(quantity)), d(float(unit)), d(float(fee)), NIL,
+                       d(float(quantity)), d(float(unit)), d(float(fee)), images_arg(row),
                        s(changes.get("memo", current.get("memo") or "")), b(True)])
         return {"transaction": self.transactions.get(transaction_id),
                 "holding": self._holding_of(account["id"], symbol),
