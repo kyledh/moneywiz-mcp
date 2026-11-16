@@ -478,15 +478,18 @@ class Transactions:
             if not currency:
                 raise MoneyWizError("A forex account holds a balance per currency; give currency")
             code = currency_code(self.n, currency)
+            where = [["investmentAccount.GID", "eq", s(target["id"])], ["symbol", "eq", s(code)]]
+            existed = bool(self.n.query("InvestmentHolding", where=where, fields=[])["items"])
             args = [ref("Account", target["id"]), s(description or ""), s(memo or ""), date(when), s(code),
                     n(float(value))]
             result = self.n.invoke("manager", RECONCILE_POSITION, args, quiet=TRANSFER_NOTICE)
-            # A new position is priced by MoneyWiz a moment later and left unsaved,
-            # which would hold up every later write; save that, and only that.
-            positions = self.n.query("InvestmentHolding", where=[["investmentAccount.GID", "eq", s(target["id"])],
-                                                                 ["symbol", "eq", s(code)]], fields=[])["items"]
+            # MoneyWiz prices a position it has just created from its exchange rate,
+            # in a block that runs once its main queue is free (seconds later while
+            # it is busy), and leaves that unsaved, which would hold up every later
+            # write. Wait for that change and save it, and only it.
+            positions = self.n.query("InvestmentHolding", where=where, fields=[])["items"]
             if positions:
-                self.n.settle([("InvestmentHolding", p["gid"]) for p in positions])
+                self.n.settle([("InvestmentHolding", p["gid"]) for p in positions], wait=0.5 if existed else 15.0)
         else:
             if currency and currency_code(self.n, currency) != target["currency"]:
                 raise MoneyWizError(f"{target['name']!r} keeps its balance in {target['currency']}")
