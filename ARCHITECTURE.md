@@ -24,8 +24,8 @@
    server asks MoneyWiz (`DataValidatorHelper` for account and category names,
    `currenciesArray` for currencies). The few guards that remain prevent states
    that would break the app or lose data: a category cycle, merging an object
-   into itself, a zero amount we would divide by, a sell of something not
-   held, a transfer to the same account, deleting an account without
+   into itself, a zero amount we would divide by, a transfer to the same
+   account, deleting an account without
    confirming its transaction count (MoneyWiz asks for that too).
 5. **Never scan the heap.** `ObjC.choose` walks malloc zones; doing that on the
    main thread while other threads allocate wedged MoneyWiz during
