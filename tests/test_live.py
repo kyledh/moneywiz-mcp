@@ -12,6 +12,7 @@ from decimal import Decimal
 import pytest
 
 from moneywiz_mcp.accounts import Accounts
+from moneywiz_mcp.budgets import Budgets
 from moneywiz_mcp.catalog import Catalog
 from moneywiz_mcp.investments import Investments
 from moneywiz_mcp.native import MoneyWizError, Native, s
@@ -32,9 +33,19 @@ def drop_scheduled(native: Native):
             Scheduled(native).delete(row["gid"])
 
 
+def drop_budgets(native: Native):
+    budgets = Budgets(native)
+    for row in native.query("Budget", where=[["name", "begins", s(SANDBOX)]], fields=[])["items"]:
+        budgets.delete(row["gid"])
+    for group in budgets.groups():
+        if group["name"].startswith(SANDBOX):
+            budgets.delete_group(group["id"])
+
+
 def cleanup(native: Native):
     accounts, catalog, transactions = Accounts(native), Catalog(native), Transactions(native)
     drop_scheduled(native)
+    drop_budgets(native)
     for account in native.query("Account", where=[["name", "begins", s(SANDBOX)]], fields=["name"])["items"]:
         for row in native.query("Transaction", where=[["account.GID", "eq", s(account["gid"])]], fields=[])["items"]:
             transactions.delete(row["gid"])
@@ -77,7 +88,7 @@ def live():
 
 def snapshot(native: Native) -> dict:
     return {entity: native.count(entity)
-            for entity in ("Account", "Transaction", "Category", "Payee", "Tag", "ScheduledTransactionHandler")}
+            for entity in ("Account", "Transaction", "Category", "Payee", "Tag", "ScheduledTransactionHandler", "Budget")}
 
 
 def ordering(native: Native) -> dict:
@@ -93,6 +104,9 @@ def ordering(native: Native) -> dict:
         "categories": {c["gid"]: (c["displayOrder"], c.get("parentCategory.GID"))
                        for c in native.query("Category", fields=["name", "displayOrder", "parentCategory.GID"])["items"]
                        if real(c)},
+        # deleteBudget: renumbers budgets in every group; the server puts the others back.
+        "budgets": {b["gid"]: (b["displayOrder"], b["groupID"])
+                    for b in native.query("Budget", fields=["name", "displayOrder", "groupID"])["items"] if real(b)},
     }
 
 
@@ -576,3 +590,66 @@ def test_adjust_balance_books_the_difference(live):
             for holding in live["portfolio"].holdings(account["id"]):
                 Investments(native).delete_holding(holding["id"], delete_trades=True)
             accounts.delete(account["id"])
+
+
+def test_budget_lifecycle(live):
+    accounts, catalog, transactions, native = live["accounts"], live["catalog"], live["transactions"], live["native"]
+    budgets = Budgets(native)
+    account = accounts.create(group_id=live["group"], name=SANDBOX + "SPEND", kind="cash", currency="CNY",
+                              opening_balance="1000")
+    category = catalog.create_category(SANDBOX + "FOOD", "expense")
+    try:
+        food = budgets.create(name=SANDBOX + "FOOD", amount_="100", categories=[category["id"]], accounts=[account["id"]],
+                              start_date="2026-11-01")
+        assert food["kind"] == "expense" and food["repeat"] == {"every": 1, "unit": "month"}
+        assert food["current_period"]["budgeted"] == "100" and food["current_period"]["spent"] == "0"
+        assert [a["id"] for a in food["accounts"]] == [account["id"]]
+        transactions.create(account=account["id"], kind="expense", amount_="30", date_="2026-11-10",
+                            categories=category["id"], description=SANDBOX + "lunch")
+        # Going over the limit raises MoneyWiz's budget warning; the server skips that alert.
+        transactions.create(account=account["id"], kind="expense", amount_="90", date_="2026-11-12",
+                            categories=category["id"], description=SANDBOX + "dinner")
+        over = budgets.get(food["id"])["current_period"]
+        assert over["spent"] == "120" and over["remaining"] == "-20"
+
+        raised = budgets.update(food["id"], amount="150", apply_to=["current", "future"])
+        assert raised["current_period"]["budgeted"] == "150" and raised["current_period"]["remaining"] == "30"
+        tagged = budgets.update(food["id"], rollover=True, tags=[SANDBOX + "TAG"])
+        assert tagged["rollover"] is True and tagged["tags"] == [SANDBOX + "TAG"]
+        renamed = budgets.update(food["id"], name=SANDBOX + "FOOD2", tags=[])
+        assert renamed["name"] == SANDBOX + "FOOD2" and "tags" not in renamed
+        assert renamed["current_period"]["budgeted"] == "150", "a rename keeps the amount"
+
+        trip = budgets.create(name=SANDBOX + "TRIP", amount_="500", categories=[category["id"]], accounts=[account["id"]],
+                              repeat="none", start_date="2026-11-01", end_date="2026-11-30")
+        assert trip["repeats"] is False and trip["end_date"].startswith("2026-11-30T23:59:59")
+        assert trip["current_period"]["spent"] == "120"
+
+        group = budgets.create_group(name=SANDBOX + "BGROUP", budget_ids=[food["id"]])
+        assert group["budget_ids"] == [food["id"]]
+        group = budgets.update_group(group["id"], budget_ids=[food["id"], trip["id"]])
+        assert set(group["budget_ids"]) == {food["id"], trip["id"]}
+        assert "group_id" not in budgets.update(trip["id"], group="")
+        assert budgets.update(trip["id"], group=group["id"])["group_id"] == group["group_id"]
+
+        moved = budgets.transfer(from_budget=trip["id"], to_budget=food["id"], amount_="20", date_="2026-11-15",
+                                 description=SANDBOX + "move")
+        assert moved["from"]["current_period"]["available"] == "480"
+        assert moved["to"]["current_period"]["available"] == "170"
+        transactions.delete(moved["transfer_id"])
+        assert budgets.get(food["id"])["current_period"]["available"] == "150"
+
+        removed = budgets.delete_group(group["id"])
+        assert set(removed["budget_ids"]) == {food["id"], trip["id"]}
+        for budget in (food, trip):
+            budgets.delete(budget["id"])
+            assert native.get("Budget", budget["id"]) is None
+        assert ordering(native)["budgets"] == live["order_before"]["budgets"], "real budgets keep their order"
+    finally:
+        drop_budgets(native)
+        for row in _transactions_of(native, account["id"]):
+            transactions.delete(row["gid"])
+        accounts.delete(account["id"])
+        catalog.delete("Category", category["id"])
+        for tag in [x for x in catalog.tags() if x["name"].startswith(SANDBOX)]:
+            catalog.delete("Tag", tag["id"])

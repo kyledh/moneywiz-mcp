@@ -81,7 +81,7 @@
 | `agent/src/agent.js` | Domain-free: fetch requests, predicates, key-path reads, typed invocation, context state, save. |
 | `native.py` | One Frida session per process, lazy attach, re-attach after an app restart, typed-argument helpers, `$date`/`$dec`/`$int` decoding, signature lookup. |
 | `values.py` | Amount, date and output formatting shared by all domains. |
-| `accounts.py`, `transactions.py`, `catalog.py`, `settings.py`, `investments.py`, `portfolio.py`, `scheduled.py` | Business rules per domain: which selector, in which order, with which guards. |
+| `accounts.py`, `transactions.py`, `catalog.py`, `settings.py`, `investments.py`, `portfolio.py`, `scheduled.py`, `budgets.py` | Business rules per domain: which selector, in which order, with which guards. |
 | `server.py` | MCP tool surface, argument descriptions, read/write annotations. |
 
 The agent knows nothing about accounts or transactions; the domain modules know
@@ -112,9 +112,14 @@ nothing about Frida. Adding a domain means adding one Python module.
   and restarts its history when they differ at all, so unchanged values are
   read raw (`Native.query(raw=True)`, tagged dates as exact seconds) and
   handed back bit for bit.
-* Budget periods name `8 = month` and `4 = year` only; other values are
-  reported raw until the budget editor is mapped. Scheduled transactions also
-  report the upcoming dates MoneyWiz computes (`-nextExecuteDateWithNum:`).
+* Budgets use the same four units (the editor offers day, week, month, year;
+  weeks are stored as days and 12 months as a year). `type` 0 is an expense
+  budget, 1 an income budget. A one-time budget's end is stored as the start
+  of the day after its last day. The tag filter is MoneyWiz's own string
+  (`+[TagsPredicate ORPredicateStringFromTagsNames:]`), percent-escaped names
+  joined by OR. A repeating budget's amount for an edit applies to a bitmask
+  of periods: 4 past, 2 current, 1 future. Scheduled transactions also report
+  the upcoming dates MoneyWiz computes (`-nextExecuteDateWithNum:`).
 * Descriptions often contain non-breaking spaces (`Coffee Shop`), so text
   search matches both space variants.
 * Parallel to-many key paths (category ids, names and amounts of a split) are

@@ -99,7 +99,7 @@ and a ledger behind a passcode still has to be unlocked by hand.
 
 ## Tools
 
-57 tools, all prefixed `moneywiz_`:
+65 tools, all prefixed `moneywiz_`:
 
 | Area | Tools |
 | --- | --- |
@@ -112,7 +112,7 @@ and a ledger behind a passcode still has to be unlocked by hand.
 | Investments | `list_holdings`, `trade`, `update_trade`, `delete_trade`, `create_holding`, `delete_holding`, `set_holding_price`, `set_holding_shares`, `set_holding_cost_basis` |
 | Loans | `list_loans`, `loan_schedule` |
 | Scheduled transactions | `list_scheduled`, `create_scheduled`, `update_scheduled`, `delete_scheduled`, `skip_scheduled`, `execute_scheduled` |
-| Budgets | `list_budgets` |
+| Budgets | `list_budgets`, `create_budget`, `update_budget`, `delete_budget`, `transfer_between_budgets`, `list_budget_groups`, `create_budget_group`, `update_budget_group`, `delete_budget_group` |
 
 What is and is not covered yet is listed in [STATUS.md](STATUS.md).
 
@@ -162,6 +162,16 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
   or turning on auto-pay, restarts the schedule's history; other edits keep
   it. A completed schedule is reported as `finished` and kept. Loan payment
   schedules are read-only here, as MoneyWiz maintains them from the loan.
+* **Budgets** are expense or income budgets over categories and accounts,
+  optionally limited to transactions with given tags. They repeat every N
+  days, weeks, months or years from a start date (default: the 1st of this
+  month), or run once between two dates. `list_budgets` reports the current
+  period as MoneyWiz computes it: `budgeted`, `available` (with rollover and
+  budget transfers), `spent` and `remaining` (negative when over). A new
+  amount on a repeating budget applies to the current period unless
+  `apply_to` names others (`past`, `current`, `future`), as in MoneyWiz's
+  editor. MoneyWiz's limit on the number of budgets for the subscription is
+  kept.
 * Unknown payee and tag names are created, as in the app (an existing name is
   reused). Unknown categories are rejected.
 * Read balances from accounts. Never sum transaction rows: they include

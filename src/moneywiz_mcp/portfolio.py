@@ -1,5 +1,5 @@
-"""Reads for D05 investments, D06 loans and D07 budgets, plus the holding writes
-that have a single, well-defined business entry point.
+"""Reads for D05 investments and D06 loans, plus the holding writes that have a
+single, well-defined business entry point.
 """
 from __future__ import annotations
 
@@ -16,26 +16,6 @@ PLAN_FIELDS = ["apr", "durationMonths", "firstDueDate", "startDate", "planType",
                "accountPayments.GID", "accountPayments.name", "categoryPrincipal.name", "categoryInterest.name",
                "payee.name", "loanAccount.GID", "loanAccount.name"]
 PLAN_ITEM_FIELDS = ["date", "paymentAmount", "principalAmount", "interestAmount", "lastP", "paid", "currencyName"]
-BUDGET_FIELDS = ["name", "balance", "carriedBalance", "openingBalance", "currencyName", "startDate", "endDate",
-                 "duration", "durationUnits", "isRepeatable", "isPeriodMoneyTransferEnabled", "type",
-                 "displayOrder", "groupID", "iconFileName", "tagsPredicateToMonitor",
-                 "accountsLinksToMonitor.account.GID", "accountsLinksToMonitor.account.name",
-                 "categoriesAssigmentsToMonitor.category.GID", "categoriesAssigmentsToMonitor.category.name"]
-# MoneyWiz's durationUnits enum is not sequential. 8=month and 4=year were
-# confirmed against the app's own -nextExecuteDateWithNum: sequence; other
-# values are reported raw rather than guessed.
-DURATION_UNITS = {4: "year", 8: "month"}
-
-
-def period(duration, units) -> str | None:
-    if not duration:
-        return None
-    name = DURATION_UNITS.get(units)
-    if name is None:
-        return f"{duration} x unit {units}"
-    return f"every {name}" if duration == 1 else f"every {duration} {name}s"
-
-
 def holding_view(row: dict) -> dict:
     return clean({
         "id": row["gid"], "symbol": row.get("symbol"), "alias": row.get("symbolAlias"),
@@ -149,36 +129,3 @@ class Portfolio:
                                 "principal": money(x.get("principalAmount")), "interest": money(x.get("interestAmount")),
                                 "remaining": money(x.get("lastP")), "paid": bool(x.get("paid"))}) for x in items],
         })
-
-    # ------------------------------------------------------------ D07 budgets
-
-    def budgets(self, *, include_past: bool = False) -> list[dict]:
-        rows = self.n.query("Budget", fields=BUDGET_FIELDS, sort=[["displayOrder", True]])["items"]
-        out = []
-        for row in rows:
-            spent = self.n.invoke("manager", "budgetsExpenses:convertToCurrency:",
-                                  [{"arr": [ref("Budget", row["gid"])]}, s(row.get("currencyName") or "CNY")],
-                                  save=False)["value"]
-            remaining = self.n.invoke("manager", "budgetsRemaining:convertToCurrency:",
-                                      [{"arr": [ref("Budget", row["gid"])]}, s(row.get("currencyName") or "CNY")],
-                                      save=False)["value"]
-            out.append(clean({
-                "id": row["gid"], "name": row.get("name"), "currency": row.get("currencyName"),
-                "limit": money(row.get("balance")),
-                "spent": money(spent), "remaining": money(remaining),
-                "carried": money(row.get("carriedBalance")),
-                "start_date": show_date(row.get("startDate")), "end_date": show_date(row.get("endDate")),
-                "repeats": bool(row.get("isRepeatable")),
-                "period": period(row.get("duration"), row.get("durationUnits")) if row.get("isRepeatable") else None,
-                "rollover": bool(row.get("isPeriodMoneyTransferEnabled")) or None,
-                "accounts": row.get("accountsLinksToMonitor.account.name") or None,
-                "categories": row.get("categoriesAssigmentsToMonitor.category.name") or None,
-                "tag_filter": row.get("tagsPredicateToMonitor") or None,
-            }))
-        return out
-
-    def budget(self, budget_id: str) -> dict:
-        found = [x for x in self.budgets() if x["id"] == budget_id]
-        if not found:
-            raise MoneyWizError(f"Budget not found: {budget_id}")
-        return found[0]

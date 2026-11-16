@@ -19,7 +19,7 @@ starting values (`tests/test_live.py`).
 | Currencies | yes | default currency, manual rates, display list | manual rate set/clear; net worth and conversions computed by MoneyWiz |
 | Investments | holdings, shares, price, cost basis | buy, sell, edit trade, delete trade, create/delete holding, manual price, share count, cost basis | buy → second buy → edit → sell → delete, with shares, cost basis and cash checked at each step |
 | Loans | accounts, payment plan, full installment schedule | — | reads |
-| Budgets | definition, limit, spent, remaining, monitored accounts/categories | — | reads |
+| Budgets | definition, current period's budgeted, available, spent and remaining, monitored accounts, categories and tags | expense and income budgets, repeating or one-time: create, update (amount for chosen periods, rollover, tags, name, period, monitored items), delete; budget groups: create, update membership, delete; transfers between budgets | monthly budget through spending past its limit, a raise for the current and future periods, rollover, tag filter added and removed, rename; one-time budget; group membership; a transfer and its deletion; real budgets keep their order |
 | Scheduled transactions | definition, next due date, repeat rule, app-computed upcoming dates, completion | expense, income, transfer: create, update, delete, skip, execute (with an amount override) | monthly bill with category, tags and payee: edit → execute → skip → execute a different amount → new rule; weekly series of 3 with weekend handling to completion; last-weekday-of-month rule; transfer with both legs; one-off |
 
 ## Not covered yet
@@ -29,8 +29,6 @@ starting values (`tests/test_live.py`).
   object from `investmentExchangeValuationForAccount:…`, and that call returns
   nil for manually priced holdings. Passing such an object between calls would
   also need the agent to keep a reference to a non-managed object across calls.
-* **Budget writes**: `createBudgetForUser:…`, `createRepeatableBudgetForUser:…`,
-  `updateBudget:…`, `updateRepeatableBudget:…`, `deleteBudget:`, budget groups.
 * **Loan creation and payment-plan edits**: `createLoanAccountForUser:…` takes 28
   arguments including a generated payment plan.
 * **Splitting one transaction across accounts**:
@@ -80,10 +78,16 @@ iCloud sync stay with MoneyWiz.
   dialog suppression patches nothing between calls; 0.1.1–0.1.2 kept a code
   patch in place, and two clients unloading in the wrong order crashed
   MoneyWiz.
-* Recording a description in MoneyWiz's autocomplete history schedules
-  `-[DataAccessor purge1YearOldStringHistoryItems]`, which deletes year-old
-  suggestions a moment later without saving. That upkeep does not hold up
-  writes; the next save commits it, as MoneyWiz's own would.
+* `deleteBudget:` lowers the display order of every budget above the deleted
+  one in every group. `delete_budget` puts the other groups back in their
+  previous order with MoneyWiz's own reorder call.
+* MoneyWiz limits how many budgets a subscription may hold; `create_budget`
+  refuses when `isBudgetsLimitReached`, as the editor does.
+* Recording a description in MoneyWiz's autocomplete history (a budget
+  transfer does) schedules `-[DataAccessor purge1YearOldStringHistoryItems]`,
+  which deletes year-old suggestions a moment later without saving. That
+  upkeep does not hold up writes; the next save commits it, as MoneyWiz's
+  own would.
 * Saved locally is not synced; MoneyWiz uploads to iCloud on its own schedule.
 * Several calls are not atomic: each business call saves independently.
 * Only build 466's `MoneyWizManager` signatures are recorded. On another build,
@@ -100,12 +104,13 @@ for its own transfers, and the "all payments are completed: delete or keep this
 scheduled transaction?" alert that
 `-[iphoneMoneyWizViewController onScheduledWaitToExecuteCountChanged:]`
 schedules when a one-off has run or a series has recorded its last occurrence,
-which the server skips for its own scheduled-transaction calls.
-`-[iphoneMoneyWizViewController onBudgetsWarning:]` raises "the following budgets
-are low / exceeded" whenever a transaction pushes a budget over. It fired for a
-plain `create_transaction` in 0.1.3 and earlier; it is now skipped for every
-saving call. This was found by reading the observer and confirmed by checking
-what MoneyWiz presents after a sandbox run, without the tracer. MoneyWiz also
+which the server skips for its own scheduled-transaction calls. Budgets add
+two: `onBudgetCreated:` selects a new budget in the sidebar, and
+`onBudgetsWarning:` raises "the following budgets are low / exceeded" whenever
+a transaction pushes a budget over. The second one also fired for a plain
+`create_transaction` in 0.1.3 and earlier; it is now skipped for every saving
+call. These were found by reading the observers and confirmed by checking what
+MoneyWiz presents after the live suite, without the tracer. MoneyWiz also
 updates its Dock badge (`-[iosMoneyWizAppDelegate updateAppBadgeNumber]`, the
 count of due bills) after scheduled-transaction changes, as it does for edits
 in the app. `set_default_currency` was not exercised, to leave the ledger's
