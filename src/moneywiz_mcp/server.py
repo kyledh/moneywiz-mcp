@@ -18,6 +18,7 @@ from .investments import Investments
 from .catalog import Catalog
 from .native import Native, MoneyWizError
 from .portfolio import Portfolio
+from .scheduled import Scheduled
 from .settings import Settings
 from .transactions import Transactions, KIND_ENTITY
 
@@ -46,6 +47,7 @@ transactions = Transactions(native)
 settings = Settings(native)
 portfolio = Portfolio(native)
 investments = Investments(native)
+scheduled = Scheduled(native)
 
 AccountRef = Annotated[str, Field(description="Account id, or its exact name")]
 Amount = Annotated[str, Field(description='Positive decimal string, e.g. "12.50"')]
@@ -73,7 +75,7 @@ def moneywiz_status() -> dict:
         "archived_accounts": len(accounts.list(include_archived=True)) - len(accounts.list()),
         "transactions": native.count("Transaction"),
         "categories": len(catalog.categories()), "payees": len(catalog.payees()), "tags": len(catalog.tags()),
-        "budgets": len(portfolio.budgets()), "scheduled": len(portfolio.scheduled()),
+        "budgets": len(portfolio.budgets()), "scheduled": native.count("ScheduledTransactionHandler"),
         "holdings": len(portfolio.holdings()),
         "account_kinds": sorted(KINDS) + ["loan"],
         "transaction_kinds": sorted(KIND_ENTITY),
@@ -536,9 +538,90 @@ def moneywiz_list_budgets() -> list[dict]:
 
 
 @mcp.tool(annotations=READ)
-def moneywiz_list_scheduled() -> list[dict]:
-    """List scheduled transactions and bills with their upcoming dates."""
-    return portfolio.scheduled()
+def moneywiz_list_scheduled(account: AccountRef | None = None) -> list[dict]:
+    """List scheduled transactions and bills: next due date, repeat rule and MoneyWiz's upcoming dates."""
+    return scheduled.list(account=account)
+
+
+Repeat = Annotated[Literal["none", "day", "week", "month", "year"], Field(description=(
+    'How often it repeats; "none" for a one-off'))]
+Every = Annotated[int, Field(description="Repeat every N units, e.g. 2 with week = every two weeks")]
+Occurrences = Annotated[int | None, Field(default=None, description=(
+    "Total number of occurrences, counting from the first date; leave out for no end"))]
+Weekends = Annotated[Literal["no_change", "before", "after", "skip"], Field(description=(
+    "When a date falls on a weekend: keep it, move it to the weekday before or after, or skip it"))]
+WeekOfMonth = Annotated[Literal["none", "first", "second", "third", "fourth", "last", "second_to_last", "third_to_last"] | None,
+                        Field(default=None, description='With day_of_week: e.g. "last" + "weekday" = last weekday of the month')]
+DayOfWeek = Annotated[Literal["none", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+                              "weekday", "weekend_day", "calendar_day"] | None, Field(default=None)]
+
+
+@mcp.tool(annotations=WRITE)
+def moneywiz_create_scheduled(
+    account: AccountRef, kind: Literal["expense", "income", "transfer"], amount: Amount,
+    date: Annotated[str, Field(description="First due date: YYYY-MM-DD (local day) or ISO 8601 timestamp")],
+    repeat: Repeat = "month", every: Every = 1, occurrences: Occurrences = None,
+    weekends: Weekends = "no_change", week_of_month: WeekOfMonth = None, day_of_week: DayOfWeek = None,
+    description: str = "", memo: str = "", payee: str | None = None, categories: Categories = None,
+    tags: Tags = None,
+    auto_pay: Annotated[bool, Field(description="Let MoneyWiz record it by itself when it is due")] = False,
+    transfer_to: Annotated[str | None, Field(default=None, description="Transfers: destination account")] = None,
+) -> dict:
+    """Schedule a bill, recurring income or recurring transfer. Nothing is recorded until it is executed."""
+    return scheduled.create(kind=kind, account=account, amount_=amount, date_=date, repeat=repeat, every=every,
+                            occurrences=occurrences, weekends=weekends, week_of_month=week_of_month,
+                            day_of_week=day_of_week, description=description, memo=memo, payee=payee,
+                            categories=categories, tags=tags, auto_pay=auto_pay, transfer_to=transfer_to)
+
+
+@mcp.tool(annotations=EDIT)
+def moneywiz_update_scheduled(
+    scheduled_id: str, account: AccountRef | None = None, amount: str | None = None,
+    date: Annotated[str | None, Field(default=None, description="New next due date")] = None,
+    repeat: Repeat | None = None, every: int | None = None, occurrences: int | None = None,
+    weekends: Weekends | None = None, week_of_month: WeekOfMonth = None, day_of_week: DayOfWeek = None,
+    description: str | None = None, memo: str | None = None, payee: str | None = None,
+    categories: Categories = None, tags: Tags = None, auto_pay: bool | None = None,
+    transfer_to: str | None = None,
+) -> dict:
+    """Change a scheduled transaction. Fields left out keep their values.
+
+    As in MoneyWiz, changing the date or the repeat rule, or turning auto_pay
+    on, restarts the schedule from the new date (its record of past
+    occurrences is cleared; transactions already recorded stay). `every`
+    counts in the stored unit, and MoneyWiz stores weeks as days, so give
+    `repeat` together with `every` to change a weekly schedule.
+    """
+    changes = {k: v for k, v in dict(account=account, amount=amount, date=date, repeat=repeat, every=every,
+                                     occurrences=occurrences, weekends=weekends, week_of_month=week_of_month,
+                                     day_of_week=day_of_week, description=description, memo=memo, payee=payee,
+                                     categories=categories, tags=tags, auto_pay=auto_pay,
+                                     transfer_to=transfer_to).items() if v is not None}
+    if not changes:
+        raise MoneyWizError("Give at least one field to change")
+    return scheduled.update(scheduled_id, **changes)
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+def moneywiz_delete_scheduled(scheduled_id: str) -> dict:
+    """Delete a scheduled transaction. Transactions it already recorded stay."""
+    return scheduled.delete(scheduled_id)
+
+
+@mcp.tool(annotations=WRITE)
+def moneywiz_skip_scheduled(scheduled_id: str) -> dict:
+    """Skip the next due occurrence without recording a transaction."""
+    return scheduled.skip(scheduled_id)
+
+
+@mcp.tool(annotations=WRITE)
+def moneywiz_execute_scheduled(
+    scheduled_id: str,
+    amount: Annotated[str | None, Field(default=None, description=(
+        "Amount actually paid, if it differs; a category split is scaled to it"))] = None,
+) -> dict:
+    """Record the next due occurrence as a transaction now (pay a bill), dated on its due date."""
+    return scheduled.execute(scheduled_id, amount)
 
 
 def main() -> None:

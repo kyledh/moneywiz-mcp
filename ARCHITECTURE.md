@@ -58,7 +58,8 @@
    with an unsaved change of its own (pricing a new forex position), `settle`
    saves it only if every object a save would write is one the caller names.
 10. **Silence only the dialogs our own calls raise.** A call may name an app
-   observer that does nothing but present UI (the "transfer succeeded" alert).
+   observer that does nothing but present UI (the "transfer succeeded" alert,
+   or the "delete or keep this completed scheduled transaction?" prompt).
    For that call only, the agent swaps the method's implementation for a
    no-op and puts the original back before the main-queue turn ends; the
    observers run inside the business call, so they are skipped, and the
@@ -76,7 +77,7 @@
 | `agent/src/agent.js` | Domain-free: fetch requests, predicates, key-path reads, typed invocation, context state, save. |
 | `native.py` | One Frida session per process, lazy attach, re-attach after an app restart, typed-argument helpers, `$date`/`$dec`/`$int` decoding, signature lookup. |
 | `values.py` | Amount, date and output formatting shared by all domains. |
-| `accounts.py`, `transactions.py`, `catalog.py`, `settings.py`, `investments.py`, `portfolio.py` | Business rules per domain: which selector, in which order, with which guards. |
+| `accounts.py`, `transactions.py`, `catalog.py`, `settings.py`, `investments.py`, `portfolio.py`, `scheduled.py` | Business rules per domain: which selector, in which order, with which guards. |
 | `server.py` | MCP tool surface, argument descriptions, read/write annotations. |
 
 The agent knows nothing about accounts or transactions; the domain modules know
@@ -96,10 +97,20 @@ nothing about Frida. Adding a domain means adding one Python module.
   commissions are primitive doubles in MoneyWiz's signatures.
 * A bare `YYYY-MM-DD` becomes local noon, which keeps the calendar day stable
   across timezones. Range ends are exclusive.
-* `durationUnits` is not a sequential enum. `8 = month` and `4 = year` were
-  confirmed by comparing MoneyWiz's own `-nextExecuteDateWithNum:` output;
-  unverified values are reported raw, and scheduled transactions also report
-  the app-computed upcoming dates.
+* Scheduled transactions use NSCalendarUnit values for `durationUnits`, as
+  MoneyWiz's repeat editor offers them: `16 = day`, `8192 = week`, `8 = month`,
+  `4 = year`; the manager stores a week as 7 days. Weekend handling, the
+  "last weekday of the month" ordinals and day names were read from the same
+  editor's labels. Unlike the plain transaction methods, the scheduled ones
+  store the amount as given, so expenses and transfers are passed negative,
+  as the editors pass them.
+* MoneyWiz compares an edited schedule's rule and date with the stored ones
+  and restarts its history when they differ at all, so unchanged values are
+  read raw (`Native.query(raw=True)`, tagged dates as exact seconds) and
+  handed back bit for bit.
+* Budget periods name `8 = month` and `4 = year` only; other values are
+  reported raw until the budget editor is mapped. Scheduled transactions also
+  report the upcoming dates MoneyWiz computes (`-nextExecuteDateWithNum:`).
 * Descriptions often contain non-breaking spaces (`Coffee Shop`), so text
   search matches both space variants.
 * Parallel to-many key paths (category ids, names and amounts of a split) are

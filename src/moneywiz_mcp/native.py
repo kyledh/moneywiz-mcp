@@ -138,13 +138,16 @@ class Native:
         return decode(self._call("status"))
 
     def query(self, entity: str, *, where=None, sort=None, limit=None, offset=None,
-              fields=None, count=False) -> dict:
+              fields=None, count=False, raw=False) -> dict:
+        """raw keeps the agent's tagged values ({"$date": seconds}), so a stored
+        value can be handed back to MoneyWiz bit for bit."""
         spec = {"entity": entity, "where": where or [], "sort": sort or [], "fields": fields or [], "count": count}
         if limit:
             spec["limit"] = limit
         if offset:
             spec["offset"] = offset
-        return decode(self._call("query", spec))
+        result = self._call("query", spec)
+        return result if raw else decode(result)
 
     def count(self, entity: str, where=None) -> int:
         return self._call("count", {"entity": entity, "where": where or []})

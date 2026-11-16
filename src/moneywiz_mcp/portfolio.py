@@ -1,10 +1,10 @@
-"""Reads for D05 investments, D06 loans, D07 budgets and D08 scheduled transactions,
-plus the writes that have a single, well-defined business entry point.
+"""Reads for D05 investments, D06 loans and D07 budgets, plus the holding writes
+that have a single, well-defined business entry point.
 """
 from __future__ import annotations
 
 from .accounts import Accounts
-from .native import Native, MoneyWizError, s, n, nb, ref, date, NIL
+from .native import Native, MoneyWizError, s, n, ref, date, NIL
 from .values import amount, money, parse_when, show_date, clean, stored
 
 HOLDING_FIELDS = ["symbol", "symbolAlias", "desc", "assetClass", "holdingType", "cusip", "pricePerShare",
@@ -21,13 +21,6 @@ BUDGET_FIELDS = ["name", "balance", "carriedBalance", "openingBalance", "currenc
                  "displayOrder", "groupID", "iconFileName", "tagsPredicateToMonitor",
                  "accountsLinksToMonitor.account.GID", "accountsLinksToMonitor.account.name",
                  "categoriesAssigmentsToMonitor.category.GID", "categoriesAssigmentsToMonitor.category.name"]
-SCHEDULED_FIELDS = ["desc", "notes", "amount", "currencyName", "executeDate", "firstExecuteDate", "lastExecuteDate",
-                    "isRepeatable", "duration", "durationUnits", "autoPay", "disableExecution", "executesCount",
-                    "waitingExecutesCount", "weekendsHandler", "fee",
-                    "account.GID", "account.name", "payee.name", "tags.name",
-                    "categoriesAssigments.category.name", "categoriesAssigments.amount",
-                    "recipientAccount.GID", "recipientAccount.name"]
-
 # MoneyWiz's durationUnits enum is not sequential. 8=month and 4=year were
 # confirmed against the app's own -nextExecuteDateWithNum: sequence; other
 # values are reported raw rather than guessed.
@@ -41,9 +34,6 @@ def period(duration, units) -> str | None:
     if name is None:
         return f"{duration} x unit {units}"
     return f"every {name}" if duration == 1 else f"every {duration} {name}s"
-SCHEDULED_KINDS = {"ScheduledWithdrawTransactionHandler": "expense",
-                   "ScheduledDepositTransactionHandler": "income",
-                   "ScheduledTransferTransactionHandler": "transfer"}
 
 
 def holding_view(row: dict) -> dict:
@@ -192,48 +182,3 @@ class Portfolio:
         if not found:
             raise MoneyWizError(f"Budget not found: {budget_id}")
         return found[0]
-
-    # ------------------------------------------------------------ D08 scheduled
-
-    def _upcoming(self, handler_id: str, count: int = 3) -> list[str]:
-        """Ask MoneyWiz itself for the next execution dates."""
-        dates = []
-        for index in range(1, count + 1):
-            value = self.n.invoke(ref("ScheduledTransactionHandler", handler_id), "nextExecuteDateWithNum:",
-                                  [{"i": index}], encoding="@24@0:8q16", save=False)["value"]
-            if value:
-                dates.append(show_date(value))
-        return dates
-
-    def scheduled(self, *, account: str | None = None, include_disabled: bool = True) -> list[dict]:
-        where = []
-        if account:
-            where.append(["account.GID", "eq", s(self.accounts.resolve(account)["id"])])
-        if not include_disabled:
-            where.append(["disableExecution", "ne", nb(True)])
-        rows = self.n.query("ScheduledTransactionHandler", where=where, fields=SCHEDULED_FIELDS,
-                            sort=[["executeDate", True]])["items"]
-        out = []
-        for row in rows:
-            categories = list(zip(row.get("categoriesAssigments.category.name") or [],
-                                  row.get("categoriesAssigments.amount") or [], strict=True))
-            out.append(clean({
-                "id": row["gid"], "kind": SCHEDULED_KINDS.get(row["$ref"], row["$ref"]),
-                "description": row.get("desc"), "memo": row.get("notes") or None,
-                "amount": stored(row.get("amount")), "currency": row.get("currencyName"),
-                "account_id": row.get("account.GID"), "account": row.get("account.name"),
-                "transfer_to_id": row.get("recipientAccount.GID"), "transfer_to": row.get("recipientAccount.name"),
-                "next_date": show_date(row.get("executeDate")),
-                "first_date": show_date(row.get("firstExecuteDate")),
-                "last_run": show_date(row.get("lastExecuteDate")),
-                "repeats": bool(row.get("isRepeatable")),
-                "period": period(row.get("duration"), row.get("durationUnits")) if row.get("isRepeatable") else None,
-                "upcoming_dates": self._upcoming(row["gid"]) if row.get("isRepeatable") else None,
-                "auto_pay": bool(row.get("autoPay")) or None,
-                "paused": bool(row.get("disableExecution")) or None,
-                "executions": row.get("executesCount"),
-                "due_now": row.get("waitingExecutesCount") or None,
-                "payee": row.get("payee.name"), "tags": row.get("tags.name") or None,
-                "categories": [{"name": name, "amount": stored(value)} for name, value in categories] or None,
-            }))
-        return out
