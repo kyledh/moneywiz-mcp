@@ -150,7 +150,7 @@ class Accounts:
                checkbook_register: bool = False, credit_limit=None, statement_end_day: int | None = None,
                opening_date: str | None = None) -> dict:
         if kind not in KINDS:
-            raise MoneyWizError(f"kind must be one of {sorted(KINDS)} (loan accounts are created with moneywiz_create_loan)")
+            raise MoneyWizError(f"kind must be one of {sorted(KINDS)} (creating loan accounts is not supported yet, see STATUS.md)")
         if not name.strip():
             raise MoneyWizError("name is required")
         if self.n.query("Account", where=[["name", "eq", s(name)]], fields=["name"])["items"]:
