@@ -99,14 +99,14 @@ class Portfolio:
 
     def set_holding_shares(self, holding_id: str, shares) -> dict:
         self.holding(holding_id)
-        value = amount(shares, field="shares", allow_zero=True)
+        value = amount(shares, field="shares")
         self.n.invoke("manager", "updateInvestmentHolding:setNumberOfShares:",
                       [ref("InvestmentHolding", holding_id), n(float(value))])
         return self.holding(holding_id)
 
     def set_holding_cost_basis(self, holding_id: str, cost_basis) -> dict:
         self.holding(holding_id)
-        value = amount(cost_basis, field="cost_basis", allow_zero=True)
+        value = amount(cost_basis, field="cost_basis")
         self.n.invoke("manager", "updateInvestmentHolding:setCostBasis:",
                       [ref("InvestmentHolding", holding_id), n(float(value))])
         return self.holding(holding_id)

@@ -1,7 +1,7 @@
 """D01 accounts and account groups."""
 from __future__ import annotations
 
-from .native import Native, MoneyWizError, s, n, ni, nb, i, b, ref, arr, date, opt_s, NIL, USER
+from .native import Native, MoneyWizError, s, n, ni, nb, i, b, ref, arr, cls, date, opt_s, NIL, USER, currency_code
 from .values import amount, money, parse_when, clean
 
 # MoneyWiz class per account kind, with its create/edit business methods.
@@ -144,6 +144,20 @@ class Accounts:
 
     # ------------------------------------------------------------ writes
 
+    def _check_name(self, name: str, account_id: str | None = None):
+        """MoneyWiz's own account-name rule (DataValidatorHelper): not empty and,
+        ignoring case, not used by another account."""
+        if not isinstance(name, str):
+            raise MoneyWizError("name: text required")
+        validator = cls("DataValidatorHelper")
+        if account_id is None:
+            ok = self.n.invoke(validator, "validateAccountName:", [s(name)], save=False, encoding="B24@0:8@16")["value"]
+        else:
+            ok = self.n.invoke(validator, "validateAccountEditName:forAccount:", [s(name), ref("Account", account_id)],
+                               save=False, encoding="B32@0:8@16@24")["value"]
+        if not ok:
+            raise MoneyWizError(f"MoneyWiz rejects the account name {name!r}: it is empty or another account uses it")
+
     def create(self, *, name: str, kind: str, currency: str, opening_balance="0", note: str = "",
                group_id: int | None = None, icon: str | None = None, include_in_networth: bool = True,
                include_in_group_balance: bool = True, auto_clear_transactions: bool = True,
@@ -151,20 +165,15 @@ class Accounts:
                opening_date: str | None = None) -> dict:
         if kind not in KINDS:
             raise MoneyWizError(f"kind must be one of {sorted(KINDS)} (creating loan accounts is not supported yet, see STATUS.md)")
-        if not name.strip():
-            raise MoneyWizError("name is required")
-        if self.n.query("Account", where=[["name", "eq", s(name)]], fields=["name"])["items"]:
-            raise MoneyWizError(f"An account named {name!r} already exists")
-        if not (isinstance(currency, str) and len(currency) == 3 and currency.isalpha()):
-            raise MoneyWizError("currency must be a 3-letter code such as CNY")
-        currency = currency.upper()
+        self._check_name(name)
+        currency = currency_code(self.n, currency)
         group = ni(self.group(group_id)["group_id"]) if group_id is not None else ni(NO_GROUP)
-        opening = amount(opening_balance, field="opening_balance", allow_zero=True, allow_negative=True)
+        opening = amount(opening_balance, field="opening_balance")
         common_tail = [group, b(auto_clear_transactions), b(checkbook_register), NIL,
                        b(include_in_networth), b(include_in_group_balance), opt_s(icon)]
         entity, create_selector, _ = KINDS[kind]
         if kind == "credit_card":
-            limit = amount(credit_limit if credit_limit is not None else 0, field="credit_limit", allow_zero=True)
+            limit = amount(credit_limit if credit_limit is not None else 0, field="credit_limit")
             args = [USER, s(name), s(note), n(float(limit)), n(float(opening)), s(currency), i(BALANCE_DISPLAY_DEFAULT),
                     i(BALANCE_DISPLAY_DEFAULT), *common_tail, NIL, b(False),
                     ni(statement_end_day or 1), i(0)]  # statementEndDay is an NSNumber, weekendOption an int
@@ -188,21 +197,21 @@ class Accounts:
         current = view(row)
         kind = current["kind"]
         if kind == "loan":
-            raise MoneyWizError("Loan accounts are edited with moneywiz_update_loan")
+            raise MoneyWizError("Editing loan accounts is not supported yet (see STATUS.md)")
         unknown = set(changes) - {"name", "note", "opening_balance", "group_id", "icon", "include_in_networth",
                                   "include_in_group_balance", "auto_clear_transactions", "checkbook_register",
                                   "credit_limit", "statement_end_day", "low_balance_alert"}
         if unknown:
             raise MoneyWizError(f"Unknown account fields: {sorted(unknown)}")
         name = changes.get("name", current["name"])
-        if name != current["name"] and self.n.query("Account", where=[["name", "eq", s(name)]], fields=["name"])["items"]:
-            raise MoneyWizError(f"An account named {name!r} already exists")
+        if name != current["name"]:
+            self._check_name(name, account_id)
         note = changes.get("note", row.get("info") or "")
         icon = changes.get("icon", row.get("iconFileName"))
         group_raw = changes.get("group_id", current.get("group_id"))
         group = ni(self.group(group_raw)["group_id"]) if group_raw is not None else ni(NO_GROUP)
         opening = amount(changes.get("opening_balance", current.get("opening_balance") or 0),
-                         field="opening_balance", allow_zero=True, allow_negative=True)
+                         field="opening_balance")
         alert = changes.get("low_balance_alert", row.get("alertBalanceFallUnderAmount"))
         flags = [b(changes.get("auto_clear_transactions", current["auto_clear_transactions"])),
                  b(changes.get("checkbook_register", current["checkbook_register"]))]
@@ -212,11 +221,11 @@ class Accounts:
         _, _, edit_selector = KINDS[kind]
         if kind == "credit_card":
             limit = amount(changes.get("credit_limit", current.get("credit_limit") or 0),
-                           field="credit_limit", allow_zero=True)
+                           field="credit_limit")
             args = [ref("Account", account_id), s(name), s(note), n(float(limit)), n(float(opening)), s(current["currency"]),
                     i(row.get("balanceDisplayMode") or BALANCE_DISPLAY_DEFAULT), i(BALANCE_DISPLAY_DEFAULT), group, *flags,
                     NIL, *networth, opt_s(icon),
-                    NIL if alert is None else n(float(amount(alert, field="low_balance_alert", allow_zero=True))),
+                    NIL if alert is None else n(float(amount(alert, field="low_balance_alert"))),
                     b(bool(row.get("alertCreditCardsExpire"))), *ob_flags,
                     ni(changes.get("statement_end_day", row.get("statementEndDay") or 1)), i(row.get("weekendOption") or 0)]
         elif kind == "investment":
@@ -228,7 +237,7 @@ class Accounts:
         else:
             args = [ref("Account", account_id), s(name), s(note), n(float(opening)), s(current["currency"]),
                     i(row.get("balanceDisplayMode") or BALANCE_DISPLAY_DEFAULT), group, *flags, NIL, *networth, opt_s(icon),
-                    NIL if alert is None else n(float(amount(alert, field="low_balance_alert", allow_zero=True))),
+                    NIL if alert is None else n(float(amount(alert, field="low_balance_alert"))),
                     b(bool(row.get("alertCreditCardsExpire"))), *ob_flags]
         self.n.invoke("manager", edit_selector, args)
         return self.get(account_id)
@@ -273,8 +282,9 @@ class Accounts:
             # instead of carrying over the position it had in the old group.
             display_order = self.n.count("Account", [["groupID", "eq", ni(NO_GROUP if target_group is None else target_group)],
                                                      ["archived", "ne", nb(True)], ["GID", "ne", s(account_id)]])
-        if not isinstance(display_order, int) or display_order < 0:
-            raise MoneyWizError("display_order must be a non-negative integer")
+        # MoneyWiz clamps an out-of-range position to the ends of the list.
+        if not isinstance(display_order, int):
+            raise MoneyWizError("display_order must be an integer")
         group = ref("Group", self.group(target_group)["id"]) if target_group is not None else NIL
         self.n.invoke("manager", "updateAccount:withDisplayOrder:andGroup:",
                       [ref("Account", account_id), ni(display_order), group])
@@ -283,11 +293,9 @@ class Accounts:
     # ------------------------------------------------------------ groups
 
     def create_group(self, *, name: str, currency: str, color: int = 4, account_ids: list[str] | None = None) -> dict:
-        if any(g["name"] == name for g in self.groups()):
-            raise MoneyWizError(f"An account group named {name!r} already exists")
         accounts = arr(ref("Account", x) for x in account_ids) if account_ids else NIL
         result = self.n.invoke("manager", "createAccountGroupForUser:name:colorNum:currency:accounts:",
-                               [USER, s(name), i(color), s(currency.upper()), accounts])["value"]
+                               [USER, s(name), i(color), s(currency_code(self.n, currency)), accounts])["value"]
         if not result:
             raise MoneyWizError("MoneyWiz did not create the group")
         return self.group(result["gid"])
@@ -296,7 +304,7 @@ class Accounts:
                      color: int | None = None, account_ids: list[str] | None = None) -> dict:
         group = self.group(group_ref)
         args = [ref("Group", group["id"]), s(name or group["name"]),
-                i(group.get("color", 4) if color is None else color), s((currency or group["currency"]).upper())]
+                i(group.get("color", 4) if color is None else color), s(currency_code(self.n, currency or group["currency"]))]
         if account_ids is None:
             self.n.invoke("manager", "updateAccountGroup:name:colorNum:currency:", args)
         else:

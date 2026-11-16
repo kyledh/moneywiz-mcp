@@ -7,32 +7,23 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN
 
 from .native import MoneyWizError
 
-_AMOUNT = re.compile(r"^-?\d{1,15}(\.\d{1,20})?$")
-# MoneyWiz stores amounts as IEEE doubles, which hold 15 significant decimal
-# digits exactly. More would be silently rounded, so they are refused.
+# MoneyWiz stores amounts as IEEE doubles, which hold 15 significant digits.
 SIGNIFICANT = 15
 
 
-def amount(value, *, field: str = "amount", allow_zero: bool = False, allow_negative: bool = False) -> Decimal:
-    """Parse a decimal amount given as string or number."""
-    text = str(value).strip() if value is not None else ""
-    if isinstance(value, float):
-        text = repr(value)
-    if not _AMOUNT.match(text):
-        raise MoneyWizError(f"{field}: expected a decimal number such as \"12.50\", got {value!r}")
+def amount(value, *, field: str = "amount") -> Decimal:
+    """Parse a number given as a decimal string or a number.
+
+    Only what is needed to hand MoneyWiz a double. Sign, size and precision
+    are left to MoneyWiz, like everything it accepts from its own editors.
+    """
+    text = repr(value) if isinstance(value, float) else (str(value).strip() if value is not None else "")
     try:
         result = Decimal(text)
-    except InvalidOperation as exc:  # pragma: no cover - regex already guards
-        raise MoneyWizError(f"{field}: invalid number {value!r}") from exc
-    digits = result.as_tuple().digits
-    significant = len("".join(map(str, digits)).lstrip("0")) or 1
-    if significant > SIGNIFICANT:
-        raise MoneyWizError(f"{field}: {value!r} has {significant} significant digits; MoneyWiz stores at most "
-                            f"{SIGNIFICANT}, so round it first")
-    if result < 0 and not allow_negative:
-        raise MoneyWizError(f"{field} must not be negative (direction comes from the transaction kind)")
-    if result == 0 and not allow_zero:
-        raise MoneyWizError(f"{field} must not be zero")
+    except InvalidOperation:
+        raise MoneyWizError(f'{field}: expected a number such as "12.50", got {value!r}') from None
+    if not result.is_finite():
+        raise MoneyWizError(f"{field}: {value!r} is not a finite number")
     return result
 
 
