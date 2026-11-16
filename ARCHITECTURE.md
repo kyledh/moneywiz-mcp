@@ -64,6 +64,9 @@
    observer that does nothing but present UI (the "transfer succeeded" alert,
    or the "delete or keep this completed scheduled transaction?" prompt).
    `native.ALWAYS_QUIET` adds the budget warning alert to every saving call.
+   The stand-in records what the observer was told (the notification's
+   object, such as MoneyWiz's lists of low and exceeded budgets), and write
+   tools return that as `budget_warnings`.
    For that call only, the agent swaps the method's implementation for a
    no-op and puts the original back before the main-queue turn ends; the
    observers run inside the business call, so they are skipped, and the
@@ -120,6 +123,11 @@ nothing about Frida. Adding a domain means adding one Python module.
   joined by OR. A repeating budget's amount for an edit applies to a bitmask
   of periods: 4 past, 2 current, 1 future. Scheduled transactions also report
   the upcoming dates MoneyWiz computes (`-nextExecuteDateWithNum:`).
+* Attachments travel as bytes: MoneyWiz is sandboxed and cannot open the
+  caller's files, so the agent writes them into MoneyWiz's own temporary
+  directory for `addImagesAtPaths:toTransaction:` and removes them after. It
+  reads an attachment from MoneyWiz's stored file (`imageAbsolutePath`);
+  `imageData` is a decoded UIImage.
 * Descriptions often contain non-breaking spaces (`Coffee Shop`), so text
   search matches both space variants.
 * Parallel to-many key paths (category ids, names and amounts of a split) are

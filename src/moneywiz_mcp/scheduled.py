@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from .accounts import Accounts
-from .native import Native, MoneyWizError, s, b, i, d, n, ref, arr, date, NIL
+from .native import Native, MoneyWizError, s, b, i, d, n, ref, arr, date, NIL, currency_code
 from .transactions import Transactions, TRANSFER_NOTICE
 from .values import amount, parse_when, show_date, clean, stored
 
@@ -224,7 +224,8 @@ class Scheduled:
     def create(self, *, kind: str, account: str, amount_, date_: str, repeat: str = "month", every: int = 1,
                occurrences: int | None = None, weekends: str = "no_change", week_of_month: str | None = None,
                day_of_week: str | None = None, description: str = "", memo: str = "", payee: str | None = None,
-               categories=None, tags=None, auto_pay: bool = False, transfer_to: str | None = None) -> dict:
+               categories=None, tags=None, auto_pay: bool = False, transfer_to: str | None = None,
+               currency: str | None = None) -> dict:
         if kind not in CREATE:
             raise MoneyWizError("kind must be expense, income or transfer")
         source = self.accounts.resolve(account)
@@ -240,11 +241,11 @@ class Scheduled:
             if target["id"] == source["id"]:
                 raise MoneyWizError("Transfer source and destination must differ")
             head.append(ref("Account", target["id"]))
-            if categories:
-                raise MoneyWizError("Categories on scheduled transfers are not supported here")
         cats, monies = self._categories(categories, value, sign)
+        # A schedule in another currency is converted at MoneyWiz's rate each time it is recorded.
+        code = currency_code(self.n, currency) if currency else source["currency"]
         args = self._args(kind, head, when, schedule, description, payee, cats, monies, sign * float(value), 0.0,
-                          source["currency"], auto_pay, memo, tags)
+                          code, auto_pay, memo, tags)
         return self._created(self.n.invoke("manager", CREATE[kind], args, quiet=SCHEDULE_NOTICE))
 
     def update(self, scheduled_id: str, **changes) -> dict:
@@ -254,7 +255,8 @@ class Scheduled:
         if kind is None:
             raise MoneyWizError(f"Unsupported scheduled transaction type {row['$ref']}")
         allowed = {"account", "amount", "date", "repeat", "every", "occurrences", "weekends", "week_of_month",
-                   "day_of_week", "description", "memo", "payee", "categories", "tags", "auto_pay", "transfer_to"}
+                   "day_of_week", "description", "memo", "payee", "categories", "tags", "auto_pay", "transfer_to",
+                   "currency"}
         unknown = set(changes) - allowed
         if unknown:
             raise MoneyWizError(f"Unknown scheduled transaction fields: {sorted(unknown)}")
@@ -297,8 +299,6 @@ class Scheduled:
                         row.get("installments") or 0]
 
         if "categories" in changes:
-            if kind == "transfer" and changes["categories"]:
-                raise MoneyWizError("Categories on scheduled transfers are not supported here")
             cats, monies = self._categories(changes["categories"], value, sign)
         else:
             ids = row.get("categoriesAssigments.category.GID") or []
@@ -317,7 +317,12 @@ class Scheduled:
             if target_id == account["id"]:
                 raise MoneyWizError("Transfer source and destination must differ")
             head.append(ref("Account", target_id))
-        currency = account["currency"] if changes.get("account") else (row.get("currencyName") or account["currency"])
+        if changes.get("currency"):
+            currency = currency_code(self.n, changes["currency"])
+        elif changes.get("account"):
+            currency = account["currency"]
+        else:
+            currency = row.get("currencyName") or account["currency"]
         args = self._args(kind, head, when, schedule, changes.get("description", current.get("description") or ""),
                           changes.get("payee", current.get("payee")), cats, monies, signed,
                           float(row.get("fee") or 0), currency,
