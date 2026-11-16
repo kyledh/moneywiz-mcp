@@ -140,7 +140,13 @@ def moneywiz_update_account(
 
 @mcp.tool(annotations=EDIT)
 def moneywiz_archive_account(account: AccountRef, archived: bool = True) -> dict:
-    """Archive an account (hides it, keeps its history) or bring it back."""
+    """Archive an account (hides it, keeps its history) or bring it back.
+
+    As in MoneyWiz, archiving takes the account out of its group into "no
+    group" (renumbering the active accounts there, without changing their
+    order), and unarchiving leaves it without a group; use
+    moneywiz_move_account to put it back into one.
+    """
     return accounts.set_archived(accounts.resolve(account)["id"], archived)
 
 
@@ -156,10 +162,19 @@ def moneywiz_delete_account(
 
 
 @mcp.tool(annotations=EDIT)
-def moneywiz_move_account(account: AccountRef,
-                          group_id: Annotated[int | None, Field(default=None, description="Target group id, or 0 for none")] = None,
-                          display_order: int | None = None) -> dict:
-    """Move an account into a group and/or change its position."""
+def moneywiz_move_account(
+    account: AccountRef,
+    group_id: Annotated[int | None, Field(default=None, description="Target group id, or 0 for none")] = None,
+    display_order: Annotated[int | None, Field(default=None, description=(
+        "Position among the target group's active accounts (0 = first). Omit when changing group "
+        "to append at the end."))] = None,
+) -> dict:
+    """Move an account into a group and/or change its position.
+
+    Like a drag in MoneyWiz, this renumbers the active accounts 0..n of the
+    target group and, when the account changes group, of the group it leaves.
+    Archived accounts are not part of that order.
+    """
     target = ... if group_id is None else (None if group_id == 0 else group_id)
     return accounts.move(accounts.resolve(account)["id"], group_id=target, display_order=display_order)
 

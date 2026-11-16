@@ -30,10 +30,16 @@
 7. **Read back after writing.** Every write returns the object re-read from the
    live graph, so the caller sees what MoneyWiz stored: the sign it chose, the
    allocation it adjusted, the id it assigned.
-8. **Refuse to write while the app has unsaved changes.** Inserted or deleted
-   objects, or updated objects with real `changedValues`, mean an editor is
-   open. MoneyWiz touches investment holdings without changing values at
-   launch, so only genuine edits count.
+8. **Refuse to write while the app has unsaved changes.** A business method
+   saves the whole context, so it would commit whatever else is pending.
+   Inserted or deleted objects, or updated objects with real `changedValues`,
+   count; MoneyWiz touches investment holdings without changing values at
+   launch, so those do not. Some pending objects are the app's own and
+   short-lived: after data changes (an iCloud import or one of our writes),
+   `MWPortfolioStoryModel` inserts a `CustomReport` to compute the portfolio
+   overview and deletes it about a second later. The agent refuses before
+   calling anything, with a named error, and `native.py` waits up to 5 s for
+   the context to clear; an editor left open is still reported.
 9. **Ship only what works.** A business call that cannot be completed reliably
    (for example share exchanges, see STATUS.md) is left out rather than exposed
    with caveats or kept as unused machinery.

@@ -48,15 +48,42 @@ def live():
     status = native.status()
     assert status["store_path"].endswith(".sqlite")
     cleanup(native)
-    yield {"native": native, "accounts": Accounts(native), "catalog": Catalog(native),
+    before, order_before = snapshot(native), ordering(native)
+    accounts = Accounts(native)
+    # Every sandbox account lives in a sandbox group: moving an account makes
+    # MoneyWiz renumber the active accounts of the group it joins and of the
+    # group it leaves, and that must never reach a real group. (Archiving
+    # moves an account to no group without renumbering; ordering() checks it.)
+    group = accounts.create_group(name=SANDBOX + "GROUP", currency="CNY")
+    yield {"native": native, "accounts": accounts, "catalog": Catalog(native),
            "transactions": Transactions(native), "settings": Settings(native), "portfolio": Portfolio(native),
-           "before": snapshot(native)}
+           "before": before, "order_before": order_before, "group": group["group_id"]}
     cleanup(native)
-    native.close()
+    try:
+        assert snapshot(native) == before, "object counts changed"
+        assert ordering(native) == order_before, "real accounts, groups or categories were reordered"
+    finally:
+        native.close()
 
 
 def snapshot(native: Native) -> dict:
     return {entity: native.count(entity) for entity in ("Account", "Transaction", "Category", "Payee", "Tag")}
+
+
+def ordering(native: Native) -> dict:
+    """Position, group and archive state of every real (non-sandbox) object."""
+    def real(row):
+        return not (row.get("name") or "").startswith(SANDBOX)
+    return {
+        "accounts": {a["gid"]: (a["displayOrder"], a["groupID"], a["archived"])
+                     for a in native.query("Account", fields=["name", "displayOrder", "groupID", "archived"])["items"]
+                     if real(a)},
+        "groups": {g["gid"]: g["displayOrder"]
+                   for g in native.query("Group", fields=["name", "displayOrder"])["items"] if real(g)},
+        "categories": {c["gid"]: (c["displayOrder"], c.get("parentCategory.GID"))
+                       for c in native.query("Category", fields=["name", "displayOrder", "parentCategory.GID"])["items"]
+                       if real(c)},
+    }
 
 
 def test_reads_do_not_touch_the_app_state(live):
@@ -70,7 +97,7 @@ def test_reads_do_not_touch_the_app_state(live):
 
 def test_expense_lifecycle(live):
     accounts, catalog, transactions = live["accounts"], live["catalog"], live["transactions"]
-    account = accounts.create(name=SANDBOX + "CASH", kind="cash", currency="CNY", opening_balance="100")
+    account = accounts.create(group_id=live["group"], name=SANDBOX + "CASH", kind="cash", currency="CNY", opening_balance="100")
     category = catalog.create_category(SANDBOX + "EXP", "expense")
     try:
         created = transactions.create(account=account["id"], kind="expense", amount_="12.50", date_="2026-11-15",
@@ -106,8 +133,8 @@ def test_expense_lifecycle(live):
 
 def test_transfer_keeps_both_legs_consistent(live):
     accounts, transactions = live["accounts"], live["transactions"]
-    source = accounts.create(name=SANDBOX + "FROM", kind="cash", currency="CNY", opening_balance="500")
-    target = accounts.create(name=SANDBOX + "TO", kind="cash", currency="USD")
+    source = accounts.create(group_id=live["group"], name=SANDBOX + "FROM", kind="cash", currency="CNY", opening_balance="500")
+    target = accounts.create(group_id=live["group"], name=SANDBOX + "TO", kind="cash", currency="USD")
     try:
         transfer = transactions.create(account=source["id"], kind="transfer", amount_="70", date_="2026-11-15",
                                        description=SANDBOX + "xfer", transfer_to=target["id"], transfer_amount="10")
@@ -132,7 +159,7 @@ def test_transfer_keeps_both_legs_consistent(live):
 
 def test_foreign_currency_expense_records_the_rate(live):
     accounts, transactions = live["accounts"], live["transactions"]
-    account = accounts.create(name=SANDBOX + "FX", kind="cash", currency="CNY")
+    account = accounts.create(group_id=live["group"], name=SANDBOX + "FX", kind="cash", currency="CNY")
     try:
         created = transactions.create(account=account["id"], kind="expense", amount_="72.00", date_="2026-11-15",
                                       description=SANDBOX + "fx", original_amount="10", original_currency="USD")
@@ -145,7 +172,7 @@ def test_foreign_currency_expense_records_the_rate(live):
 
 def test_refund_links_back_to_the_expense(live):
     accounts, transactions = live["accounts"], live["transactions"]
-    account = accounts.create(name=SANDBOX + "REF", kind="cash", currency="CNY", opening_balance="100")
+    account = accounts.create(group_id=live["group"], name=SANDBOX + "REF", kind="cash", currency="CNY", opening_balance="100")
     try:
         expense = transactions.create(account=account["id"], kind="expense", amount_="30", date_="2026-11-14",
                                       description=SANDBOX + "purchase")
@@ -162,7 +189,7 @@ def test_refund_links_back_to_the_expense(live):
 
 def test_catalog_merge_moves_references(live):
     catalog, accounts, transactions = live["catalog"], live["accounts"], live["transactions"]
-    account = accounts.create(name=SANDBOX + "MERGE", kind="cash", currency="CNY")
+    account = accounts.create(group_id=live["group"], name=SANDBOX + "MERGE", kind="cash", currency="CNY")
     keep = catalog.create_named("Payee", SANDBOX + "KEEP")
     drop = catalog.create_named("Payee", SANDBOX + "DROP")
     try:
@@ -196,13 +223,43 @@ def test_rejects_bad_input_before_touching_the_app(live):
     assert native.status()["context"]["pending"] == 0
 
 
+# Archiving is not exercised here: MoneyWiz moves an archived account to "no
+# group" and renumbers the active accounts there, which are the user's real
+# ones. (Deleting it afterwards renumbers them again, which only restores the
+# original values when they were already contiguous.)
+def test_account_move_stays_inside_sandbox_groups(live):
+    accounts, native = live["accounts"], live["native"]
+    home = live["group"]
+    other = accounts.create_group(name=SANDBOX + "OTHER", currency="CNY")["group_id"]
+    made = [accounts.create(group_id=home, name=SANDBOX + f"ORDER{i}", kind="cash", currency="CNY") for i in range(3)]
+    names = lambda group: [a["name"].removeprefix(SANDBOX) for a in accounts.list(group_id=group)]
+    try:
+        assert names(home) == ["ORDER0", "ORDER1", "ORDER2"]
+        accounts.move(made[2]["id"], display_order=0)
+        assert names(home) == ["ORDER2", "ORDER0", "ORDER1"]
+        assert [a["display_order"] for a in accounts.list(group_id=home)] == [0, 1, 2]
+
+        moved = accounts.move(made[0]["id"], group_id=other)  # no position: appended, not carried over
+        assert moved["group_id"] == other and moved["display_order"] == 0
+        assert names(home) == ["ORDER2", "ORDER1"] and names(other) == ["ORDER0"]
+        assert [a["display_order"] for a in accounts.list(group_id=home)] == [0, 1], "the group it left is renumbered"
+        with pytest.raises(MoneyWizError):
+            accounts.move(made[0]["id"])  # same group and no position
+        assert ordering(native) == live["order_before"]
+    finally:
+        for account in made:
+            accounts.delete(account["id"])
+        accounts.delete_group(other)
+
+
 def test_ledger_is_unchanged_by_the_suite(live):
     assert snapshot(live["native"]) == live["before"]
+    assert ordering(live["native"]) == live["order_before"]
 
 
 def test_investment_trade_lifecycle(live):
     accounts, investments, portfolio = live["accounts"], Investments(live["native"]), live["portfolio"]
-    account = accounts.create(name=SANDBOX + "BROKER", kind="investment", currency="USD",
+    account = accounts.create(group_id=live["group"], name=SANDBOX + "BROKER", kind="investment", currency="USD",
                               opening_balance="10000", opening_date="2026-11-01")
     try:
         bought = investments.trade(account=account["id"], side="buy", symbol="MCPTEST", shares="10",
@@ -245,7 +302,7 @@ def test_investment_trade_lifecycle(live):
 
 def test_manual_holding_and_price(live):
     accounts, investments, portfolio = live["accounts"], Investments(live["native"]), live["portfolio"]
-    account = accounts.create(name=SANDBOX + "BROKER2", kind="investment", currency="USD", opening_balance="100")
+    account = accounts.create(group_id=live["group"], name=SANDBOX + "BROKER2", kind="investment", currency="USD", opening_balance="100")
     try:
         holding = investments.create_holding(account=account["id"], symbol="MCPTESTY", name=SANDBOX + "Y",
                                              holding_type="Stock", shares="100", price="2.50")

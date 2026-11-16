@@ -138,8 +138,9 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
 
 * Every input is validated before MoneyWiz is touched, because an exception
   raised inside the app would terminate it.
-* Writes are refused while MoneyWiz has unsaved edits of its own (an open
-  editor), so a half-finished entry is never committed for you.
+* Writes wait while MoneyWiz has unsaved changes of its own and are refused if
+  they persist for 5 seconds (an open editor), so a half-finished entry is
+  never committed for you.
 * Deleting an account deletes its transactions, so the tool refuses unless you
   pass the exact transaction count it reports. Archiving is usually better.
 * Categories, payees, tags and holdings that are still referenced cannot be
