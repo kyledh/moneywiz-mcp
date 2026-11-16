@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .native import Native, MoneyWizError, s, n, ni, nb, i, b, ref, arr, cls, date, decode, opt_s, NIL, USER, currency_code
-from .values import amount, money, parse_when, clean
+from .values import amount, clean, find_one, money, parse_when
 
 # MoneyWiz class per account kind, with its create/edit business methods.
 KINDS = {
@@ -99,6 +99,15 @@ def view(row: dict) -> dict:
     return clean(out) | {"archived": out["archived"]}
 
 
+# What a list of accounts shows of each; moneywiz_get_account shows every setting.
+BRIEF = ("id", "name", "kind", "currency", "balance", "group_id", "credit_limit")
+
+
+def brief(account: dict) -> dict:
+    out = {k: account[k] for k in BRIEF if account.get(k) is not None}
+    return out | {"archived": True} if account.get("archived") else out
+
+
 class Accounts:
     def __init__(self, native: Native):
         self.n = native
@@ -148,10 +157,7 @@ class Accounts:
                        "display_order": r.get("displayOrder"), "collapsed": bool(r.get("isCollapsed"))}) for r in rows]
 
     def group(self, group_ref: str | int) -> dict:
-        for group in self.groups():
-            if group["id"] == group_ref or group.get("group_id") == group_ref:
-                return group
-        raise MoneyWizError(f"Account group not found: {group_ref}")
+        return find_one(self.groups(), group_ref, "account group")
 
     # ------------------------------------------------------------ writes
 
@@ -362,9 +368,9 @@ class Accounts:
 
     def reorder_groups(self, ordered_ids: list[str]) -> list[dict]:
         known = {g["id"]: g for g in self.groups()}
-        unknown = [x for x in ordered_ids if x not in known]
-        if unknown:
-            raise MoneyWizError(f"Unknown groups: {unknown}")
+        # A partial order would leave two groups at the same position.
+        if sorted(ordered_ids) != sorted(known):
+            raise MoneyWizError("Give every account group exactly once (see moneywiz_list_groups, kind account)")
         for position, group_id in enumerate(ordered_ids):
             if known[group_id].get("display_order") != position:
                 self.n.invoke("manager", "updateAccountGroup:withDisplayOrder:", [ref("Group", group_id), ni(position)])

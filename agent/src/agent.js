@@ -788,6 +788,15 @@ rpc.exports = {
 
   count(spec) { return onMain(() => count(env(), spec)); },
 
+  // Many counts in one main-queue turn (what uses each category, say): [spec, ...] -> [n, ...].
+  counts(specs) {
+    return onMain(() => {
+      need(Array.isArray(specs) && specs.length <= 5000, 'counts: a list of up to 5000 count specs');
+      const e = env();
+      return specs.map(spec => count(e, spec));
+    });
+  },
+
   // spec: {target, selector, args, encoding?, fields?, save?, quiet?, read_only?}
   // A write is refused while the app holds unsaved changes. Once the business
   // method has run, what it left unsaved is saved (inside the same quiet

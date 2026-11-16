@@ -221,6 +221,10 @@ class Native:
     def count(self, entity: str, where=None) -> int:
         return self._call("count", {"entity": entity, "where": where or []})
 
+    def counts(self, specs: list[tuple[str, list]]) -> list[int]:
+        """Several counts ([(entity, where), ...]) in one call."""
+        return self._call("counts", [{"entity": entity, "where": where or []} for entity, where in specs]) if specs else []
+
     def get(self, entity: str, gid: str, fields=None) -> dict | None:
         items = self.query(entity, where=[["GID", "eq", s(gid)]], fields=fields, limit=2)["items"]
         if len(items) > 1:

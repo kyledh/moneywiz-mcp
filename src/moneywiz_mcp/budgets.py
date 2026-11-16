@@ -14,7 +14,7 @@ from .catalog import Catalog
 from .native import Native, MoneyWizError, s, n, i, d, b, ni, ref, arr, cls, date, NIL, USER, currency_code
 from .scheduled import UNITS, UNIT_NAMES
 from .settings import Settings
-from .values import amount, clean, day_start, local_time, money, next_day_start, parse_when, show_date, stored, today
+from .values import amount, clean, day_start, find_one, local_time, money, next_day_start, parse_when, show_date, stored, today
 
 KINDS = {"expense": 0, "income": 1}
 KIND_NAMES = {v: k for k, v in KINDS.items()}
@@ -63,7 +63,9 @@ def decode_tags(predicate: str | None):
     return None, None  # a mixed expression; reported raw
 
 
-def view(row: dict, current: dict | None = None) -> dict:
+def view(row: dict, current: dict | None = None, paths: dict[str, str] | None = None) -> dict:
+    """paths: category id -> full path. Monitored accounts are named (MoneyWiz keeps account
+    names unique) and categories given by path, as the tools accept them back."""
     repeats = bool(row.get("isRepeatable"))
     tags, match = decode_tags(row.get("tagsPredicateToMonitor"))
     accounts = list(zip(row.get("accountsLinksToMonitor.account.GID") or [],
@@ -85,8 +87,8 @@ def view(row: dict, current: dict | None = None) -> dict:
         "rollover": bool(row.get("isPeriodMoneyTransferEnabled")) if repeats else None,
         "carried_balance": money(row.get("carriedBalance")) if row.get("carriedBalance") else None,
         "group_id": row.get("groupID"),
-        "accounts": [{"id": a, "name": nm} for a, nm in accounts] or None,
-        "categories": [{"id": c, "name": nm} for c, nm in categories] or None,
+        "accounts": [nm for _, nm in accounts] or None,
+        "categories": [(paths or {}).get(c, nm) for c, nm in categories] or None,
         "tags": tags, "tags_match": match,
         "tag_filter": row.get("tagsPredicateToMonitor") if row.get("tagsPredicateToMonitor") and tags is None else None,
         "icon": row.get("iconFileName"),
@@ -124,15 +126,19 @@ class Budgets:
             raise MoneyWizError(f"Budget not found: {budget_id}")
         return rows[0]
 
-    def _view(self, row: dict) -> dict:
+    def _view(self, row: dict, paths: dict[str, str]) -> dict:
         index = row.get("currentPeriodNumber")
-        return view(row, self._period(row["gid"], int(index)) if isinstance(index, int) and index >= 0 else None)
+        return view(row, self._period(row["gid"], int(index)) if isinstance(index, int) and index >= 0 else None, paths)
+
+    def _paths(self) -> dict[str, str]:
+        return {c["id"]: c["path"] for c in self.catalog.categories()}
 
     def list(self) -> list[dict]:
-        return [self._view(r) for r in self._rows()]
+        paths = self._paths()
+        return [self._view(r, paths) for r in self._rows()]
 
     def get(self, budget_id: str) -> dict:
-        return self._view(self._row(budget_id))
+        return self._view(self._row(budget_id), self._paths())
 
     def resolve(self, value: str) -> dict:
         rows = self._rows([["GID", "eq", s(value)]]) or self._rows([["name", "eq", s(value)]])
@@ -153,10 +159,7 @@ class Budgets:
                        "budget_ids": members.get(r.get("groupId"))}) for r in rows]
 
     def group(self, group_ref) -> dict:
-        for group in self.groups():
-            if group_ref in (group["id"], group.get("group_id"), group.get("name")):
-                return group
-        raise MoneyWizError(f"Budget group not found: {group_ref}")
+        return find_one(self.groups(), group_ref, "budget group")
 
     # ------------------------------------------------------------ helpers
 
@@ -330,7 +333,7 @@ class Budgets:
         members = [r["gid"] for r in self._rows() if member(r)]
         ids = [self.resolve(x)["gid"] for x in ordered]
         if sorted(ids) != sorted(members):
-            raise MoneyWizError("Give every budget of that group exactly once (see moneywiz_list_budget_groups)")
+            raise MoneyWizError("Give every budget of that group exactly once (see moneywiz_list_groups, kind budget)")
         self._place("Budget", ids, "Budget display order changed")
         return [self.get(x) for x in ids]
 

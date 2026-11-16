@@ -135,3 +135,14 @@ def flag(value) -> bool | None:
 def clean(record: dict) -> dict:
     """Drop None values to keep tool output compact."""
     return {k: v for k, v in record.items() if v is not None and v != [] and v != ""}
+
+
+def find_one(items: list[dict], ref, what: str, keys=("id", "group_id", "name")) -> dict:
+    """The one item whose id, numeric id or name is ref (a number given as text matches too)."""
+    text = str(ref)
+    found = [x for x in items if any(x.get(k) is not None and (x[k] == ref or str(x[k]) == text) for k in keys)]
+    if len(found) > 1:
+        raise MoneyWizError(f"Several {what}s match {ref!r}; use the id")
+    if not found:
+        raise MoneyWizError(f"{what[0].upper()}{what[1:]} not found: {ref}")
+    return found[0]

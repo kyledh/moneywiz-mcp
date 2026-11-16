@@ -116,23 +116,53 @@ A ledger behind a passcode still has to be unlocked by hand.
 
 ## Tools
 
-90 tools, all prefixed `moneywiz_`:
+69 tools, all prefixed `moneywiz_`:
 
 | Area | Tools |
 | --- | --- |
 | Status, backup | `status`, `backup` |
 | Accounts | `list_accounts`, `get_account`, `create_account`, `update_account`, `archive_account`, `delete_account`, `move_account` |
-| Account groups | `list_account_groups`, `create_account_group`, `update_account_group`, `delete_account_group` |
-| Transactions | `list_transactions`, `get_transaction`, `create_transaction`, `update_transaction`, `set_transaction_status`, `set_transactions_status`, `delete_transaction`, `delete_transactions`, `convert_to_refund`, `adjust_balance`, `create_split_transaction`, `add_attachment`, `get_attachment`, `remove_attachment` |
-| Categories, payees, tags | `list_categories`, `list_payees`, `list_tags`, `create_category`, `update_category`, `reorder_categories`, `create_payee`, `create_tag`, `rename_payee`, `rename_tag`, `delete_catalog_object`, `merge_catalog_objects`, `catalog_usage` |
-| Currencies | `currency_settings`, `net_worth`, `set_default_currency`, `get_exchange_rate`, `set_exchange_rate`, `clear_exchange_rate`, `set_display_currencies` |
-| Investments | `list_holdings`, `trade`, `update_trade`, `delete_trade`, `split_holding`, `exchange_currency`, `update_exchange`, `create_holding`, `delete_holding`, `set_holding_price`, `set_holding_shares`, `set_holding_cost_basis` |
+| Groups, display order | `list_groups`, `create_group`, `update_group`, `delete_group` (of accounts, budgets or reports); `reorder` (categories, budgets, reports, groups) |
+| Transactions | `list_transactions`, `get_transaction`, `create_transaction`, `update_transaction`, `set_transaction_status`, `delete_transactions`, `convert_to_refund`, `adjust_balance`, `create_split_transaction`, `add_attachment`, `get_attachment`, `remove_attachment` |
+| Categories, payees, tags | `list_categories`, `list_payees`, `list_tags`, `create_category`, `update_category`, `create_catalog_object`, `rename_catalog_object`, `delete_catalog_object`, `merge_catalog_objects` |
+| Currencies | `currency_settings`, `net_worth`, `set_default_currency`, `get_exchange_rate`, `set_exchange_rate`, `set_display_currencies` |
+| Investments | `list_holdings`, `trade`, `update_trade`, `split_holding`, `exchange_currency`, `update_exchange`, `create_holding`, `update_holding`, `delete_holding` |
 | Loans | `list_loans`, `loan_schedule` |
 | Scheduled transactions | `list_scheduled`, `create_scheduled`, `update_scheduled`, `delete_scheduled`, `skip_scheduled`, `execute_scheduled` |
-| Reports | `list_reports`, `get_report_data`, `compute_report`, `create_report`, `update_report`, `reorder_reports`, `delete_report`, `list_report_groups`, `create_report_group`, `update_report_group`, `delete_report_group`, `reorder_report_groups` |
-| Budgets | `list_budgets`, `create_budget`, `update_budget`, `delete_budget`, `transfer_between_budgets`, `list_budget_groups`, `create_budget_group`, `update_budget_group`, `delete_budget_group`, `reorder_budgets`, `reorder_budget_groups` |
+| Reports | `list_reports`, `get_report_data`, `compute_report`, `create_report`, `update_report`, `delete_report` |
+| Budgets | `list_budgets`, `create_budget`, `update_budget`, `delete_budget`, `transfer_between_budgets` |
+
+Tools of one kind of change across several objects share one tool (groups,
+display order, status and deletion of one transaction or many); a tool never
+mixes reading with writing, so a client's read-only and destructive markers
+stay true. Results are one compact JSON text. Lists keep to what tells their
+entries apart: accounts by name (MoneyWiz keeps account names unique, and every
+tool takes a name), categories, payees and tags with how many transactions use
+each, budgets with the accounts and category paths they monitor; the `get_`
+tools give every field and id.
 
 What is and is not covered yet is listed in [STATUS.md](STATUS.md).
+
+### Upgrading from 0.1.x
+
+0.2 merged tools that did one kind of change on different objects. A client
+discovers the new names by itself; prompts or skills that name tools need:
+
+| 0.1.x | 0.2 |
+| --- | --- |
+| `list_account_groups`, `list_budget_groups`, `list_report_groups` | `list_groups` with `kind` `account`, `budget` or `report` |
+| `create_/update_/delete_account_group` (and `_budget_group`, `_report_group`) | `create_group`, `update_group`, `delete_group` with `kind`; members as `members` |
+| `reorder_categories`, `reorder_budgets`, `reorder_budget_groups`, `reorder_reports`, `reorder_report_groups` | `reorder` with `object_type` |
+| `set_transactions_status` | `set_transaction_status` (takes `transaction_ids`) |
+| `delete_transaction`, `delete_trade` | `delete_transactions` (one id or several) |
+| `create_payee`, `create_tag`, `rename_payee`, `rename_tag` | `create_catalog_object`, `rename_catalog_object` with `object_type` |
+| `catalog_usage` | the counts in `list_categories`, `list_payees`, `list_tags` |
+| `set_holding_price`, `set_holding_shares`, `set_holding_cost_basis` | `update_holding` |
+| `clear_exchange_rate` | `set_exchange_rate` with `rate` null |
+
+List rows no longer repeat account and payee ids next to their names
+(`get_transaction` and `get_account` keep them), and `list_accounts` shows
+balances and groups only.
 
 ### Conventions
 

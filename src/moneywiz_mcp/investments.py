@@ -299,5 +299,5 @@ class Investments:
     def delete_trade(self, transaction_id: str) -> dict:
         current = self.transactions.get(transaction_id)
         if current["kind"] not in ("investment_buy", "investment_sell", "investment_exchange"):
-            raise MoneyWizError(f"{current['kind']} is not an investment trade; use moneywiz_delete_transaction")
+            raise MoneyWizError(f"{current['kind']} is not an investment trade; use moneywiz_delete_transactions")
         return self.transactions.delete(transaction_id)

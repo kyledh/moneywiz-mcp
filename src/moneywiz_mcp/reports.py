@@ -17,7 +17,7 @@ from .accounts import Accounts
 from .budgets import Budgets
 from .catalog import Catalog
 from .native import Native, MoneyWizError, s, i, b, ni, ref, arr, date, NIL, USER, prev, recorded_encoding
-from .values import clean, day_start, local_time, money, next_day_start, parse_when, show_date, show_seconds, today
+from .values import clean, day_start, find_one, local_time, money, next_day_start, parse_when, show_date, show_seconds, today
 
 # Report kinds the server creates, by MoneyWiz's typed creator.
 _TIME = "reportTimePeriod:fromDate:toDate:includeScheduledTransactions:"
@@ -381,10 +381,7 @@ class Reports:
                 for r in rows if r]
 
     def group(self, group_ref) -> dict:
-        for group in self.groups():
-            if group_ref in (group["id"], group.get("group_id"), group.get("name")):
-                return group
-        raise MoneyWizError(f"Report group not found: {group_ref}")
+        return find_one(self.groups(), group_ref, "report group")
 
     # ------------------------------------------------------------ create
 
@@ -526,7 +523,7 @@ class Reports:
         group_id = self.group(group)["group_id"] if group not in (None, "") else None
         ids = [self.resolve(x)["gid"] for x in ordered]
         if sorted(ids) != sorted(self._members(group_id)):
-            raise MoneyWizError("Give every saved report of that group exactly once (see moneywiz_list_report_groups)")
+            raise MoneyWizError("Give every saved report of that group exactly once (see moneywiz_list_groups, kind report)")
         self._place(ids)
         return [self.get(x) for x in ids]
 

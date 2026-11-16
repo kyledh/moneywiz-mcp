@@ -10,12 +10,22 @@ TYPE_NAMES = {v: k for k, v in CATEGORY_TYPES.items()}
 DEFAULT_ICON = "mw2_category_icon_179"
 
 CATEGORY_FIELDS = ["name", "type", "parentCategory.GID", "imageFileName", "imageColorNum", "displayOrder"]
-USAGE_FIELDS = {
-    "Category": ["categoryAssigments", "childCategories", "connectedPaymentPlansForInterestCategory",
-                 "connectedPaymentPlansForPrincipalCategory"],
-    "Payee": ["transactions", "scheduledTransactions", "connectedPaymentPlans"],
-    "Tag": ["transactions", "scheduledTransactions"],
+# What uses a category, payee or tag: (entity, key path to the object's GID).
+# A category's assignments also link it to budgets and to MoneyWiz's
+# description history, so each kind of user is counted on its own.
+USES = {
+    "Category": {"transactions": ("Transaction", "categoriesAssigments.category.GID"),
+                 "scheduled": ("ScheduledTransactionHandler", "categoriesAssigments.category.GID"),
+                 "budgets": ("Budget", "categoriesAssigmentsToMonitor.category.GID"),
+                 "subcategories": ("Category", "parentCategory.GID"),
+                 "loans": ("PaymentPlan", "categoryPrincipal.GID"),
+                 "loan_interest": ("PaymentPlan", "categoryInterest.GID")},
+    "Payee": {"transactions": ("Transaction", "payee.GID"), "scheduled": ("ScheduledTransactionHandler", "payee.GID"),
+              "loans": ("PaymentPlan", "payee.GID")},
+    "Tag": {"transactions": ("Transaction", "tags.GID"), "scheduled": ("ScheduledTransactionHandler", "tags.GID")},
 }
+# What a list shows of it: how many transactions, and other users only when there are any.
+LISTED_USES = ("transactions", "scheduled", "budgets")
 
 
 def _name(value: str, field: str = "name") -> str:
@@ -139,6 +149,18 @@ class Catalog:
         rows = self.n.query("Tag", fields=["name"], sort=[["name", True]])["items"]
         return [{"id": r["gid"], "name": r["name"]} for r in rows]
 
+    def uses(self, entity: str, ids: list[str], kinds=None) -> dict[str, dict[str, int]]:
+        """How many of each kind of object use each of these, counted by MoneyWiz in one call."""
+        kinds = [k for k in USES[entity] if kinds is None or k in kinds]
+        specs = [(USES[entity][k][0], [[USES[entity][k][1], "eq", s(x)]]) for x in ids for k in kinds]
+        numbers = iter(self.n.counts(specs))
+        return {x: {k: next(numbers) for k in kinds} for x in ids}
+
+    def with_uses(self, entity: str, items: list[dict]) -> list[dict]:
+        """List entries with how many transactions use each, and other users when there are any."""
+        uses = self.uses(entity, [x["id"] for x in items], LISTED_USES)
+        return [x | {k: v for k, v in uses[x["id"]].items() if v or k == "transactions"} for x in items]
+
     def _named(self, entity: str, object_id: str) -> dict:
         found = self.n.get(entity, object_id, ["name"])
         if not found:
@@ -163,11 +185,9 @@ class Catalog:
     # ------------------------------------------------------------ shared delete / merge
 
     def usage(self, entity: str, object_id: str) -> dict:
-        fields = USAGE_FIELDS[entity]
-        found = self.n.get(entity, object_id, [f + ".GID" for f in fields])
-        if not found:
+        if not self.n.get(entity, object_id, []):
             raise MoneyWizError(f"{entity} not found: {object_id}")
-        return {f: len(found.get(f + ".GID") or []) for f in fields}
+        return self.uses(entity, [object_id])[object_id]
 
     def delete(self, entity: str, object_id: str) -> dict:
         # What MoneyWiz does with the references is its own rule; report them.
