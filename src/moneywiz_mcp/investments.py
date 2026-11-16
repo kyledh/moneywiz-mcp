@@ -97,9 +97,9 @@ class Investments:
         unit = amount(price, field="price")
         # A negative commission is a rebate; MoneyWiz stores and nets it as given.
         fee = amount(commission, field="commission")
+        # Selling a symbol that is not held opens a short position: MoneyWiz's
+        # sell method creates the holding itself, as a buy does.
         existing = self._holding_of(resolved["id"], symbol)
-        if side == "sell" and existing is None:
-            raise MoneyWizError(f"{resolved['name']!r} holds no {symbol}; buy it or add the holding first")
         if existing and existing.get("name") and not description:
             description = existing["name"]
         before = set(self._trade_ids(resolved["id"]))

@@ -142,8 +142,10 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
   "transfer between A and B succeeded" dialog is skipped for transfers made
   through the server; transfers entered in the app still show it.
 * **Trades** buy or sell by symbol; a first buy creates the holding, and
-  MoneyWiz recalculates shares, cost basis and the account's cash. A negative
-  commission is a rebate: a buy then costs `shares x price - rebate`.
+  MoneyWiz recalculates shares, cost basis and the account's cash. Selling a
+  symbol you do not hold opens a short position (negative shares), and a later
+  buy covers it. A negative commission is a rebate: a buy then costs
+  `shares x price - rebate`.
 * Unknown payee and tag names are created, as in the app (an existing name is
   reused). Unknown categories are rejected.
 * Read balances from accounts. Never sum transaction rows: they include

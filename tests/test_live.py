@@ -381,6 +381,27 @@ def test_refund_uses_the_expense_category_and_full_precision(live):
         catalog.delete("Category", category["id"])
 
 
+def test_selling_what_is_not_held_opens_a_short(live):
+    accounts, investments = live["accounts"], Investments(live["native"])
+    account = accounts.create(group_id=live["group"], name=SANDBOX + "SHORT", kind="investment", currency="USD",
+                              opening_balance="1000")
+    try:
+        short = investments.trade(account=account["id"], side="sell", symbol="MCPTESTS", shares="10", price="20",
+                                  date_="2026-11-10", commission="1", holding_type="Stock")
+        assert short["transaction"]["amount"] == "199" and short["holding"]["shares"] == "-10"
+        assert short["account_balance"] == "1199"
+        cover = investments.trade(account=account["id"], side="buy", symbol="MCPTESTS", shares="10", price="18",
+                                  date_="2026-11-12", commission="1")
+        assert cover["holding"]["shares"] == "0" and cover["account_balance"] == "1018"
+    finally:
+        for row in live["native"].query("Transaction", where=[["account.GID", "eq", s(account["id"])]],
+                                        fields=[])["items"]:
+            investments.delete_trade(row["gid"])
+        for holding in live["native"].query("InvestmentHolding", where=[["symbol", "eq", s("MCPTESTS")]], fields=[])["items"]:
+            investments.delete_holding(holding["gid"], delete_trades=True)
+        accounts.delete(account["id"])
+
+
 def test_manual_holding_and_price(live):
     accounts, investments, portfolio = live["accounts"], Investments(live["native"]), live["portfolio"]
     account = accounts.create(group_id=live["group"], name=SANDBOX + "BROKER2", kind="investment", currency="USD", opening_balance="100")
