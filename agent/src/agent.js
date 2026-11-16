@@ -868,8 +868,13 @@ rpc.exports = {
   // The calculation writes scratch state into its context (every account's
   // display mode; for forecasts, future occurrences of scheduled transactions
   // with their schedules advanced), so it must never run in the main context.
-  // spec: {gid, calls: [[class, "- selector", encoding]], fields, root: {key: shape},
+  // spec: {gid | create, calls: [[class, "- selector", encoding]], fields, root: {key: shape},
   //        shapes: {name: {fields, each: {key: [shape, limit]}}}, max_nodes, timeout}
+  // A report that is not saved (spec.create: {selector, args, encoding}, one of
+  // MoneyWiz's typed creators, which builds a report without calculating it) is
+  // built in the main context as MoneyWiz's report editor builds one; its
+  // settings are copied and it is deleted again within this main-queue turn,
+  // so nothing of it is left for a save. Only the copy is calculated.
   reportData(spec) {
     return new Promise((resolve, reject) => ObjC.schedule(ObjC.mainQueue, () => {
       const held = [];
@@ -877,24 +882,53 @@ rpc.exports = {
       let timer = null;
       try {
         const e = env(), method = checkedCalls(spec.calls);
-        const report = lookup(e, 'CustomReport', spec.gid);
-        need(Boolean(toJS(report.valueForKey_(nsString('isReportSaved')))), 'Not a saved report');
-        const value = key => report.valueForKey_(nsString(key));
-        const int = key => { const v = value(key); return isNil(v) ? 0 : Number(v.intValue()); };
-        const bool = key => { const v = value(key); return !isNil(v) && Boolean(v.boolValue()); };
-        const settings = [int('predefinedReportType'), int('mainDataType')];
-        const stored = value('filtersArray');
-        const filters = C.NSArray.alloc().initWithArray_copyItems_(isNil(stored) ? C.NSArray.array() : stored, true);
-        held.push(filters); // alloc/init: already ours
-        const setUser = method('TransactionsFilter', '- setUser:');
-        for (let i = 0; i < Number(filters.count()); i++) {
-          const f = filters.objectAtIndex_(i), m = f.respondsToSelector_(ObjC.selector('setUser:')) ? f['- setUser:'] : null;
-          need(m && m.types.replace(/[0-9]/g, '') === setUser.types.replace(/[0-9]/g, ''), `Report filter ${f.$className} changed`);
+        let report, built = null;
+        if (spec.create) {
+          requireClean(e, contextState(e));
+          e.produced = [];
+          try {
+            invokeOn(e, { target: 'manager', selector: spec.create.selector, args: spec.create.args,
+                          encoding: spec.create.encoding });
+          } catch (err) {
+            for (const o of e.produced)
+              if (!isNil(o) && kindOf(o, C.NSManagedObject) && o.isInserted()) e.context.deleteObject_(o);
+            throw err;
+          }
+          built = e.produced.length && !isNil(e.produced[e.produced.length - 1]) ? e.produced[e.produced.length - 1] : null;
+          report = built;
+        } else {
+          report = lookup(e, 'CustomReport', spec.gid);
+          need(Boolean(toJS(report.valueForKey_(nsString('isReportSaved')))), 'Not a saved report');
         }
-        const rest = [int('chartType'), int('chartOptions'), int('breakdownPeriod'), int('predefinedDatesPeriod'),
-          hold(value('fromDate')), hold(value('toDate'))];
-        const flags = [bool('includeSheduledTransactions'), bool('includeArchivedAccounts')];
-        const sorting = hold(value('reportSortingType'));
+        let settings, filters, rest, flags, sorting;
+        try {
+          need(!isNil(report) && kindOf(report, C.CustomReport), 'MoneyWiz did not build the report');
+          const value = key => report.valueForKey_(nsString(key));
+          const int = key => { const v = value(key); return isNil(v) ? 0 : Number(v.intValue()); };
+          const bool = key => { const v = value(key); return !isNil(v) && Boolean(v.boolValue()); };
+          settings = [int('predefinedReportType'), int('mainDataType')];
+          const stored = value('filtersArray');
+          filters = C.NSArray.alloc().initWithArray_copyItems_(isNil(stored) ? C.NSArray.array() : stored, true);
+          held.push(filters); // alloc/init: already ours
+          const setUser = method('TransactionsFilter', '- setUser:');
+          for (let i = 0; i < Number(filters.count()); i++) {
+            const f = filters.objectAtIndex_(i), m = f.respondsToSelector_(ObjC.selector('setUser:')) ? f['- setUser:'] : null;
+            need(m && m.types.replace(/[0-9]/g, '') === setUser.types.replace(/[0-9]/g, ''), `Report filter ${f.$className} changed`);
+          }
+          rest = [int('chartType'), int('chartOptions'), int('breakdownPeriod'), int('predefinedDatesPeriod'),
+            hold(value('fromDate')), hold(value('toDate'))];
+          flags = [bool('includeSheduledTransactions'), bool('includeArchivedAccounts')];
+          sorting = hold(value('reportSortingType'));
+        } finally {
+          if (built !== null && kindOf(built, C.NSManagedObject) && built.isInserted()) {
+            e.context.deleteObject_(built);
+            e.context.processPendingChanges();
+          }
+        }
+        if (built !== null) {
+          const left = contextState(e);
+          need(left.pending === 0, `Building the report left ${left.pending} unsaved changes in MoneyWiz`);
+        }
         const userID = hold(e.user.objectID());
         const child = hold(method('MoneyWizManager', '- forkToChildManagedObjectContext').call(e.manager));
         need(!isNil(child), 'MoneyWiz did not fork a context for the report');
@@ -951,6 +985,78 @@ rpc.exports = {
 
   // Read-only introspection for scripts/check_build.py: what a new MoneyWiz
   // build offers for the methods, ivars and model the server relies on.
+  // A backup made the way MoneyWiz's automatic backups make one
+  // (MWBackupsManager manageBackups): MoneyWiz zips its database on a
+  // background queue (the iCloud store for an iCloud ledger, as its own
+  // shouldUseICloudBackup decides) and hands the zip to a completion block on
+  // the main queue, which moves it into MoneyWiz's backups folder. Unlike the
+  // automatic run, nothing is pruned: older backups in that folder stay.
+  // spec: {calls: [[class, "- selector", encoding]], timeout}
+  backup(spec) {
+    return new Promise((resolve, reject) => ObjC.schedule(ObjC.mainQueue, () => {
+      // What the completion block uses stays retained until the block has run, even
+      // after a timeout has answered the caller (a freed object crashed MoneyWiz once).
+      const held = [];
+      const hold = o => { if (!isNil(o)) { o.retain(); held.push(o); } return o; };
+      const release = () => { held.forEach(o => o.release()); held.length = 0; };
+      const state = { answered: false };
+      const answer = (error, value) => {
+        if (state.answered) return;
+        state.answered = true;
+        if (error) reject(error); else resolve(value);
+      };
+      let timer = null, called = false;
+      try {
+        const e = env(), method = checkedCalls(spec.calls);
+        const M = C.MWBackupsManager, backups = method('MWBackupsManager', '+ defaultManager').call(M);
+        need(!isNil(backups), 'MoneyWiz has no backup manager');
+        need(!method('MWBackupsManager', '- backupCreationInProgress').call(backups),
+          'MoneyWiz is making a backup of its own right now; retry in a moment');
+        const icloud = Boolean(method('MWBackupsManager', '- shouldUseICloudBackup').call(backups));
+        const folder = hold(method('MWBackupsManager', '+ backupsFolderURL').call(M));
+        need(!isNil(folder), 'MoneyWiz has no backups folder set');
+        const create = method('MoneyWizManager', icloud ? '- createMoneyWizICloudBackupFile:' : '- createMoneyWizBackupFile:');
+        const seconds = spec.timeout || 300;
+        const block = new ObjC.Block({ retType: 'void', argTypes: ['object', 'object'], implementation: (zip, failure) => {
+          try {
+            if (!isNil(failure)) fail(`MoneyWiz could not make the backup: ${failure.localizedDescription()}`);
+            need(!isNil(zip), 'MoneyWiz made no backup file');
+            const fm = C.NSFileManager.defaultManager();
+            const scoped = Boolean(folder.startAccessingSecurityScopedResource());
+            try {
+              fm.createDirectoryAtPath_withIntermediateDirectories_attributes_error_(folder.path(), true, NULL, NULL);
+              const target = folder.URLByAppendingPathComponent_(zip.lastPathComponent());
+              // A backup from the same minute has the same name; MoneyWiz replaces it too.
+              if (fm.fileExistsAtPath_(target.path())) fm.removeItemAtURL_error_(target, NULL);
+              need(fm.moveItemAtURL_toURL_error_(zip, target, NULL), 'Could not move the backup into MoneyWiz\'s backups folder');
+              const attrs = fm.attributesOfItemAtPath_error_(target.path(), NULL);
+              answer(null, { path: target.path().toString(), file_name: zip.lastPathComponent().toString(),
+                             size: isNil(attrs) ? null : Number(attrs.fileSize()),
+                             kind: icloud ? 'icloud_database' : 'data_folder' });
+            } finally {
+              if (scoped) folder.stopAccessingSecurityScopedResource();
+            }
+          } catch (err) {
+            answer(new Error(err.message || String(err)));
+          } finally {
+            clearTimeout(timer);
+            pending.delete(block);
+            release();
+          }
+        } });
+        timer = setTimeout(() => answer(new Error(`MoneyWiz did not finish the backup within ${seconds} s; `
+          + 'it may still appear in its backups folder')), seconds * 1000);
+        pending.add(block);
+        called = true;
+        create.call(e.manager, block);
+      } catch (err) {
+        if (timer !== null) clearTimeout(timer);
+        if (!called) release();
+        answer(err);
+      }
+    }));
+  },
+
   signatures(pairs) {
     need(Array.isArray(pairs), 'signatures: [[class, "- selector"], ...]');
     return pairs.map(([className, selector]) => {

@@ -47,6 +47,16 @@ def test_transaction_view_reports_split_and_fx():
     assert "fee" not in view
 
 
+def test_transaction_view_marks_stock_splits():
+    base = {"gid": "T9", "amount": 0.0, "status": 2, "reconciled": 0, "account.currencyName": "USD",
+            "investmentHolding.symbol": "XYZ", "numberOfShares": 30.0, "pricePerShare": 0.0}
+    split = transaction_view({**base, "$ref": "InvestmentBuyTransaction", "flags": 8})
+    assert split["stock_split"] is True and split["shares"] == "30" and split["price_per_share"] == "0"
+    # Other flag bits (online-banking state) do not make a split.
+    assert "stock_split" not in transaction_view({**base, "$ref": "InvestmentSellTransaction", "flags": 6})
+    assert "stock_split" not in transaction_view({**base, "$ref": "InvestmentBuyTransaction", "flags": None})
+
+
 def test_transaction_view_links_transfer_legs():
     out_leg = transaction_view({"$ref": "TransferWithdrawTransaction", "gid": "T2", "amount": -80.0,
                                 "status": 1, "reconciled": 0, "account.currencyName": "USD",

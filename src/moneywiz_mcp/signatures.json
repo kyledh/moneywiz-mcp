@@ -1091,6 +1091,12 @@
    "- activeCloudKitEventCount": "Q16@0:8",
    "- hasActiveExportEvents": "B16@0:8",
    "- isStartupSyncActivityInProgress": "B16@0:8"
+  },
+  "MWBackupsManager": {
+   "+ defaultManager": "@16@0:8",
+   "- backupCreationInProgress": "B16@0:8",
+   "- shouldUseICloudBackup": "B16@0:8",
+   "+ backupsFolderURL": "@16@0:8"
   }
  }
 }

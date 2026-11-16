@@ -55,6 +55,9 @@ CLASS_KIND["LoanAccount"] = "loan"
 NO_GROUP = -1
 BALANCE_DISPLAY_DEFAULT = 3  # value used by every account in the observed ledger
 ONLINE_FETCH_OFF = 0
+# The delete dialog's "convert transfers" (MWAlertViewHelper confirmDeleteAccount:…):
+# runs before deleteAccount:, so the other accounts keep their balances.
+CONVERT_TRANSFERS = "convertAccountTransfersToExpensesAndIncomes:"
 
 FIELDS = ["name", "info", "currencyName", "archived", "openingBalance", "displayOrder", "groupID", "iconFileName",
           "includeInNetworth", "includeInGroupBalance", "clearTransactionOnCreation", "enableCheckbookRegister",
@@ -249,19 +252,31 @@ class Accounts:
         self.n.invoke("manager", "archiveAccount:" if archived else "unArchiveAccount:", [ref("Account", account_id)])
         return self.get(account_id)
 
-    def delete(self, account_id: str, *, confirm_transactions: int | None = None) -> dict:
+    def delete(self, account_id: str, *, confirm_transactions: int | None = None,
+               convert_transfers: bool = False) -> dict:
         current = self.get(account_id)
         count = self.n.count("Transaction", [["account.GID", "eq", s(account_id)]])
         if count and confirm_transactions != count:
             raise MoneyWizError(
                 f"Account {current['name']!r} still holds {count} transactions, which would be deleted with it. "
                 f"Pass confirm_transactions={count} to proceed, or archive the account instead.")
+        transfers = sum(self.n.count(entity, [["account.GID", "eq", s(account_id)]])
+                        for entity in ("TransferWithdrawTransaction", "TransferDepositTransaction"))
+        # MoneyWiz's "convert transfers" when deleting an account: the other side
+        # of each transfer becomes an ordinary income or expense of that account.
+        if convert_transfers and transfers and \
+                self.n.invoke("manager", CONVERT_TRANSFERS, [ref("Account", account_id)])["value"] is False:
+            raise MoneyWizError("MoneyWiz reported that it could not convert the account's transfers; "
+                                "the account was not deleted (check its transfers in MoneyWiz)")
         result = self.n.invoke("manager", "deleteAccount:", [ref("Account", account_id)])
         if result["value"] is False:
             raise MoneyWizError("MoneyWiz refused to delete the account")
         if self.n.get("Account", account_id):
             raise MoneyWizError("Account still exists after delete")
-        return {"deleted": account_id, "name": current["name"], "deleted_transactions": count}
+        out = {"deleted": account_id, "name": current["name"], "deleted_transactions": count}
+        if transfers:
+            out["converted_transfers" if convert_transfers else "deleted_transfers"] = transfers
+        return out
 
     def move(self, account_id: str, *, group_id: int | None = ..., display_order: int | None = None) -> dict:
         """Move an account to a position and/or another group.

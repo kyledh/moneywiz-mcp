@@ -10,14 +10,17 @@ from __future__ import annotations
 import ast
 import inspect
 
-from . import accounts, budgets, catalog, investments, lifecycle, native, portfolio, reports, scheduled, settings, transactions
+from . import (accounts, backups, budgets, catalog, investments, lifecycle, native, portfolio, reports, scheduled,
+               settings, transactions)
 
-MODULES = (accounts, budgets, catalog, investments, lifecycle, portfolio, reports, scheduled, settings, transactions)
+MODULES = (accounts, backups, budgets, catalog, investments, lifecycle, portfolio, reports, scheduled, settings,
+           transactions)
 
 # Field lists read with native.query(), by the entity they are read from.
 FIELD_LISTS = {
     "Account": [accounts.FIELDS], "Group": [accounts.GROUP_FIELDS, budgets.GROUP_FIELDS, reports.GROUP_FIELDS],
-    "Transaction": [transactions.FIELDS], "Category": [catalog.CATEGORY_FIELDS],
+    "Transaction": [transactions.FIELDS], "InvestmentExchangeTransaction": [transactions.EXCHANGE_FIELDS],
+    "Category": [catalog.CATEGORY_FIELDS],
     "ScheduledTransactionHandler": [scheduled.FIELDS], "Budget": [budgets.FIELDS],
     "InvestmentHolding": [portfolio.HOLDING_FIELDS], "PaymentPlan": [portfolio.PLAN_FIELDS],
     "PaymentPlanItem": [portfolio.PLAN_ITEM_FIELDS], "CustomReport": [reports.FIELDS],

@@ -30,7 +30,7 @@ KIND_ENTITY = {
 ENTITY_KIND = {v: k for k, v in KIND_ENTITY.items()}
 EDITABLE = {"expense", "income", "refund", "transfer_out", "transfer_in"}
 
-FIELDS = ["date", "amount", "desc", "notes", "status", "reconciled", "voidCheque", "checkbookNumber",
+FIELDS = ["date", "amount", "desc", "notes", "status", "reconciled", "voidCheque", "checkbookNumber", "flags",
           "originalAmount", "originalCurrency", "originalExchangeRate", "fee", "originalFee", "originalFeeCurrency",
           "numberOfShares", "pricePerShare", "symbol",
           "account.GID", "account.name", "account.currencyName", "payee.GID", "payee.name",
@@ -71,6 +71,18 @@ EDIT_TRANSFER = ("editTransferWithdrawTransaction:fromAccount:toAccount:descript
                  "exchangeRate:toAmount:toAmountCurrency:fee:feeCurrency:date:receiveDate:categories:categoriesMoney:"
                  "payeeName:imagesPaths:checkbookNumber:tagsNames:")
 DELETE = "deleteTransactionWithBalanceRecalculation:notifyAccountsBalanceChange:"
+# MoneyWiz's bulk delete (the transaction list's multiple selection): one save,
+# one "Transaction bulk delete" notification, linked legs and refunds included.
+DELETE_MANY = "deleteTransactions:"
+# The transaction list's "reconcile" for a selection: one save for all of them.
+RECONCILE_MANY = "setAllTransactionsReconciled:reconciled:clearIfPendingAndReconciled:"
+# "Refund from income": MoneyWiz records a refund of the expense with the
+# income's account, amount, date, payee, notes, attachments and state, the
+# expense's categories in proportion and both tag lists, then deletes the income.
+CONVERT_TO_REFUND = "convertDepositTransactionToRefund:refundWithdrawTransaction:"
+# -[MoneyWizManager markStocksSplitTransaction:] sets this bit of Transaction.flags
+# on the buy or sell a stock split records; MoneyWiz's gain calculation reads it.
+STOCK_SPLIT_FLAG = 8
 EDIT_BUDGET_TRANSFER = ("editTransferBudgetTransaction:fromBudget:toBudget:description:notes:amount:exchangeRate:fee:date:"
                         "imagesPaths:tagsNames:")
 _SPLIT_TAIL = ("description:payeeName:originalCurrency:originalExchangeRate:originalAmount:amount:amountCurrency:fee:date:"
@@ -173,9 +185,33 @@ def view(row: dict) -> dict:
         out["symbol"] = row["investmentHolding.symbol"]
         out["shares"] = stored(row.get("numberOfShares"))
         out["price_per_share"] = stored(row.get("pricePerShare"))
+    if kind in ("investment_buy", "investment_sell") and int(row.get("flags") or 0) & STOCK_SPLIT_FLAG:
+        out["stock_split"] = True
     if kind == "reconcile":
         out.pop("original", None)
     return clean(out) | {"reconciled": out["reconciled"]}
+
+
+# What a currency exchange holds beyond the common fields (InvestmentExchangeTransaction).
+EXCHANGE_FIELDS = ["fromSymbol", "fromNumberOfShares", "toSymbol", "toNumberOfShares", "originalFee",
+                   "originalFeeCurrency"]
+
+
+def exchange_view(row: dict) -> dict:
+    """The amounts as entered, worked out as MoneyWiz's exchange editor does
+    (fillTransactionFieldsFromTransaction:): the positions also carry the fee
+    when it is in their currency, which `positions` shows."""
+    source, target = row.get("fromSymbol"), row.get("toSymbol")
+    fee = Decimal(stored(row.get("originalFee")) or "0")
+    fee_currency = row.get("originalFeeCurrency")
+    out_change = Decimal(stored(row.get("fromNumberOfShares")) or "0")
+    in_change = Decimal(stored(row.get("toNumberOfShares")) or "0")
+    given = -(out_change + (fee if fee_currency == source else 0))
+    received = in_change + (fee if fee_currency == target else 0)
+    return clean({"from_currency": source, "from_amount": stored(float(given)), "to_currency": target,
+                  "to_amount": stored(float(received)), "fee": stored(float(fee)) if fee else None,
+                  "fee_currency": fee_currency if fee else None,
+                  "positions": {source: stored(float(out_change)), target: stored(float(in_change))}})
 
 
 class Transactions:
@@ -235,7 +271,7 @@ class Transactions:
         limit = max(1, min(int(limit), 500))
         result = self.n.query(entity, where=where, fields=FIELDS, sort=[["date", False]],
                               limit=limit, offset=offset, count=True)
-        items = [view(r) for r in result["items"]]
+        items = self._with_exchanges([view(r) for r in result["items"]])
         return {"total": result.get("total"), "offset": offset, "count": len(items),
                 "next_offset": offset + len(items) if offset + len(items) < (result.get("total") or 0) else None,
                 "transactions": items}
@@ -244,7 +280,17 @@ class Transactions:
         row = self.n.get("Transaction", transaction_id, FIELDS)
         if row is None:
             raise MoneyWizError(f"Transaction not found: {transaction_id}")
-        return view(row)
+        return self._with_exchanges([view(row)])[0]
+
+    def _with_exchanges(self, items: list[dict]) -> list[dict]:
+        ids = [x["id"] for x in items if x["kind"] == "investment_exchange"]
+        if ids:
+            rows = {r["gid"]: r for r in self.n.query("InvestmentExchangeTransaction", fields=EXCHANGE_FIELDS,
+                                                      where=[["GID", "in", arr(s(x) for x in ids)]])["items"]}
+            for x in items:
+                if x["id"] in rows:
+                    x["exchange"] = exchange_view(rows[x["id"]])
+        return items
 
     def _row(self, transaction_id: str) -> dict:
         row = self.n.get("Transaction", transaction_id, FIELDS)
@@ -642,34 +688,121 @@ class Transactions:
     # ------------------------------------------------------------ state & delete
 
     def set_status(self, transaction_id: str, status: str) -> dict:
-        current = self.get(transaction_id)
+        self._apply_status(self.get(transaction_id), status)
+        return self.get(transaction_id)
+
+    def _apply_status(self, current: dict, status: str) -> bool:
+        """Put one transaction (a view) in a state; False when it already was."""
+        transaction = ref("Transaction", current["id"])
         if status in ("cleared", "pending"):
-            if current["status"] != status:
-                self.n.invoke("manager", "clearTransaction:" if status == "cleared" else "unclearTransaction:",
-                              [ref("Transaction", transaction_id)])
+            if current["status"] == status:
+                return False
+            self.n.invoke("manager", "clearTransaction:" if status == "cleared" else "unclearTransaction:", [transaction])
         elif status in ("reconciled", "unreconciled"):
             want = status == "reconciled"
-            if current["reconciled"] != want:
-                self.n.invoke("manager", "setTransactionReconciled:reconciled:clearIfPendingAndReconciled:",
-                              [ref("Transaction", transaction_id), b(want), b(True)])
+            if current["reconciled"] == want:
+                return False
+            self.n.invoke("manager", "setTransactionReconciled:reconciled:clearIfPendingAndReconciled:",
+                          [transaction, b(want), b(True)])
         elif status in ("void", "unvoid"):
             want = status == "void"
-            if bool(current.get("void")) != want:
-                self.n.invoke("manager", "updateTransaction:setVoidCheque:", [ref("Transaction", transaction_id), b(want)])
+            if bool(current.get("void")) == want:
+                return False
+            self.n.invoke("manager", "updateTransaction:setVoidCheque:", [transaction, b(want)])
         else:
             raise MoneyWizError("status must be cleared, pending, reconciled, unreconciled, void or unvoid")
-        return self.get(transaction_id)
+        return True
+
+    def set_status_many(self, transaction_ids: list[str], status: str) -> dict:
+        """Put several transactions in one state. Reconciling goes through MoneyWiz's
+        call for a selection (one save); the other states are set one by one, as the
+        transaction list's bulk actions do."""
+        current = self._many(transaction_ids)
+        if status in ("reconciled", "unreconciled"):
+            want = status == "reconciled"
+            todo = [x["id"] for x in current if x["reconciled"] != want]
+            if todo:
+                self.n.invoke("manager", RECONCILE_MANY, [arr(ref("Transaction", x) for x in todo), b(want), b(True)])
+        else:
+            todo = [x["id"] for x in current if self._apply_status(x, status)]
+        after = {x["id"]: x for x in self._many(transaction_ids)}
+        return {"status": status, "changed": todo, "unchanged": [x for x in after if x not in todo],
+                "transactions": [{"id": x["id"], "status": x.get("status"), "reconciled": x["reconciled"],
+                                  **({"void": True} if x.get("void") else {})} for x in after.values()]}
+
+    def _many(self, transaction_ids) -> list[dict]:
+        """Views of the given transactions in the given order; every id must exist."""
+        if not isinstance(transaction_ids, list) or not transaction_ids \
+                or not all(isinstance(x, str) and x for x in transaction_ids):
+            raise MoneyWizError("transaction_ids: a list of one or more transaction ids")
+        ids = list(dict.fromkeys(transaction_ids))
+        rows = {r["gid"]: view(r) for r in self.n.query(
+            "Transaction", where=[["GID", "in", arr(s(x) for x in ids)]], fields=FIELDS)["items"]}
+        missing = [x for x in ids if x not in rows]
+        if missing:
+            raise MoneyWizError(f"Transactions not found: {missing}")
+        return [rows[x] for x in ids]
+
+    @staticmethod
+    def _goes_with(current: dict) -> list[str]:
+        """What MoneyWiz deletes with a transaction: a transfer's other leg, an expense's refunds."""
+        return [x for x in [current.get("other_leg_id"), *(current.get("refunded_by_ids") or [])] if x]
 
     def delete(self, transaction_id: str) -> dict:
         current = self.get(transaction_id)
-        removed = [transaction_id]
-        if current.get("other_leg_id"):
-            removed.append(current["other_leg_id"])
-        # MoneyWiz deletes an expense's refunds with it.
-        removed += [x for x in current.get("refunded_by_ids") or [] if x not in removed]
+        removed = list(dict.fromkeys([transaction_id, *self._goes_with(current)]))
         self.n.invoke("manager", DELETE, [ref("Transaction", transaction_id), b(True)])
         still = [x for x in removed if self.n.get("Transaction", x)]
         if still:
             raise MoneyWizError(f"Transaction still exists after delete: {still}")
         return {"deleted": removed, "description": current.get("description"), "amount": current.get("amount"),
                 "account": current.get("account")}
+
+    def delete_many(self, transaction_ids: list[str]) -> dict:
+        current = self._many(transaction_ids)
+        removed = list(dict.fromkeys(x for row in current for x in [row["id"], *self._goes_with(row)]))
+        self.n.invoke("manager", DELETE_MANY, [arr(ref("Transaction", row["id"]) for row in current)])
+        left = {r["gid"] for r in self.n.query("Transaction", where=[["GID", "in", arr(s(x) for x in removed)]],
+                                               fields=[])["items"]}
+        if left:
+            raise MoneyWizError(f"Transactions still exist after delete: {sorted(left)}")
+        given = {row["id"] for row in current}
+        return clean({"deleted": removed, "count": len(removed),
+                      "also_deleted": [x for x in removed if x not in given]})
+
+    def staged_copies(self, transaction_id: str, row: dict) -> list[str]:
+        """Copies of a transaction's attachments in MoneyWiz's temporary directory, for
+        an edit MoneyWiz carries out by deleting the transaction and recording it again
+        (a trade moved to another account or symbol): it deletes the stored files
+        first, so the current paths would leave the new record without attachments.
+        The caller removes the copies with unstage_file afterwards."""
+        staged = []
+        try:
+            for index in range(len(_images(row))):
+                found = self.n.attachment(transaction_id, index)
+                if not found.get("local"):
+                    raise MoneyWizError(f"Attachment {index} has not been downloaded from iCloud yet, and this change "
+                                        "would lose it; open it in MoneyWiz first, then retry")
+                name = found.get("originalFileName") or (found.get("path") or "").rsplit("/", 1)[-1] or "receipt"
+                staged.append(self.n.stage_file(f"{index}-" + re.sub(r"[^A-Za-z0-9._-]", "_", name)[-110:],
+                                                found["base64"]))
+        except Exception:
+            for path in staged:
+                self.n.unstage_file(path)
+            raise
+        return staged
+
+    # ------------------------------------------------------------ refund from income
+
+    def convert_to_refund(self, income_id: str, expense_id: str) -> dict:
+        income, expense = self.get(income_id), self.get(expense_id)
+        if income["kind"] != "income":
+            raise MoneyWizError(f"{income_id} is {income['kind']}, not income")
+        if expense["kind"] != "expense":
+            raise MoneyWizError(f"{expense_id} is {expense['kind']}, not an expense")
+        result = self.n.invoke("manager", CONVERT_TO_REFUND,
+                               [ref("Transaction", income_id), ref("Transaction", expense_id)])["value"]
+        if not isinstance(result, dict) or not result.get("gid") or not self.n.get("Transaction", result["gid"]):
+            raise MoneyWizError("MoneyWiz did not record the refund; check the app")
+        return {"refund": self.get(result["gid"]), "replaced_income": income_id,
+                "income_deleted": self.n.get("Transaction", income_id) is None}

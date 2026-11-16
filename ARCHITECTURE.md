@@ -167,11 +167,25 @@ nothing about Frida. Adding a domain means adding one Python module.
   once), and the methods the agent calls itself are listed in the module's
   `AGENT_CALLS` and checked against the recorded signatures before it starts.
   Results are read by field lists the Python side names, as for queries.
+  A report that is not saved (`compute_report`) is first built in the main
+  context by MoneyWiz's typed creator, as its report editor builds one; the
+  creator does not calculate (`calculateData:NO`), and the agent copies its
+  settings and deletes it again within the same main-queue turn, checking
+  that nothing is left unsaved, before calculating the copy as above.
+* A backup is made as `MWBackupsManager manageBackups` makes one, without its
+  schedule check and pruning: the manager's creator (the iCloud store's
+  variant for an iCloud ledger, as `shouldUseICloudBackup` decides) zips the
+  database on a background queue and calls a block on the main queue, which
+  moves the zip into MoneyWiz's backups folder. What the block uses stays
+  retained until it has run, even after a timeout answered the caller.
 * Attachments travel as bytes: MoneyWiz is sandboxed and cannot open the
   caller's files, so the agent writes them into MoneyWiz's own temporary
   directory for `addImagesAtPaths:toTransaction:` and removes them after. It
   reads an attachment from MoneyWiz's stored file (`imageAbsolutePath`);
-  `imageData` is a decoded UIImage.
+  `imageData` is a decoded UIImage. An edit MoneyWiz performs by deleting
+  and recording the transaction again (a trade moved to another account or
+  symbol) deletes the stored files first, so the server stages copies of them
+  the same way and passes those paths instead.
 * Descriptions often contain non-breaking spaces (`Coffee Shop`), so text
   search matches both space variants.
 * Parallel to-many key paths (category ids, names and amounts of a split) are

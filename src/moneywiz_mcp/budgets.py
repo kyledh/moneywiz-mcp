@@ -14,7 +14,7 @@ from .catalog import Catalog
 from .native import Native, MoneyWizError, s, n, i, d, b, ni, ref, arr, cls, date, NIL, USER, currency_code
 from .scheduled import UNITS, UNIT_NAMES
 from .settings import Settings
-from .values import amount, clean, local_tz, money, parse_when, show_date, stored
+from .values import amount, clean, day_start, local_tz, money, parse_when, show_date, stored
 
 KINDS = {"expense": 0, "income": 1}
 KIND_NAMES = {v: k for k, v in KINDS.items()}
@@ -49,12 +49,6 @@ TRANSFER = "createTransferTransactionFromBudget:toBudget:description:notes:amoun
 # newly created budget in the sidebar. Skipped for the server's own calls (the
 # budget warning alert is skipped for every write, see native.ALWAYS_QUIET).
 BUDGET_NOTICE = (("iphoneMoneyWizViewController", "onBudgetCreated:"),)
-
-
-def _day(value: str, field: str) -> datetime:
-    """The local start of a day, as the editor passes dates (timelessDateFromDate:)."""
-    moment = parse_when(value, field=field).astimezone(local_tz())
-    return datetime.combine(moment.date(), time(0, 0), tzinfo=local_tz())
 
 
 def decode_tags(predicate: str | None):
@@ -230,7 +224,7 @@ class Budgets:
         value = amount(amount_, field="amount")
         code = currency_code(self.n, currency or self.settings.currencies().get("default_currency"))
         if start_date:
-            start = _day(start_date, "start_date")
+            start = day_start(start_date, field="start_date")
         else:  # the editor's default: the first day of the current month
             today = datetime.now(local_tz()).date()
             start = datetime.combine(today.replace(day=1), time(0, 0), tzinfo=local_tz())
@@ -239,7 +233,7 @@ class Budgets:
         if repeat == "none":
             if not end_date:
                 raise MoneyWizError("A one-time budget needs end_date")
-            end = _day(end_date, "end_date") + timedelta(days=1)  # stored as the start of the next day
+            end = day_start(end_date, field="end_date") + timedelta(days=1)  # stored as the start of the next day
             args = head + [n(float(value)), s(code), *monitored, date(start), date(end), self._group_id(group),
                            s(icon) if icon else NIL]
             result = self.n.invoke("manager", CREATE_ONCE, args, quiet=BUDGET_NOTICE)
@@ -280,7 +274,7 @@ class Budgets:
             self._tags(changes["tags"]) if "tags" in changes
             else (s(row["tagsPredicateToMonitor"]) if row.get("tagsPredicateToMonitor") else NIL),
         ]
-        start = date(_day(changes["start_date"], "start_date")) if changes.get("start_date") \
+        start = date(day_start(changes["start_date"], field="start_date")) if changes.get("start_date") \
             else {"date": datetime.fromisoformat(row["startDate"]).timestamp()}
         group = self._group_id(changes["group"]) if "group" in changes else \
             (ni(row["groupID"]) if row.get("groupID") not in (None, 0, -1) else NIL)
@@ -289,7 +283,7 @@ class Budgets:
 
         if repeat == "none":
             if changes.get("end_date"):
-                end = date(_day(changes["end_date"], "end_date") + timedelta(days=1))
+                end = date(day_start(changes["end_date"], field="end_date") + timedelta(days=1))
             elif row.get("endDate"):
                 end = {"date": datetime.fromisoformat(row["endDate"]).timestamp()}
             else:
