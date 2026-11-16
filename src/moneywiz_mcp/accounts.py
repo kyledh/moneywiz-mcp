@@ -1,7 +1,7 @@
 """D01 accounts and account groups."""
 from __future__ import annotations
 
-from .native import Native, MoneyWizError, s, n, ni, nb, i, b, ref, arr, cls, date, opt_s, NIL, USER, currency_code
+from .native import Native, MoneyWizError, s, n, ni, nb, i, b, ref, arr, cls, date, decode, opt_s, NIL, USER, currency_code
 from .values import amount, money, parse_when, clean
 
 # MoneyWiz class per account kind, with its create/edit business methods.
@@ -54,7 +54,9 @@ CLASS_KIND["LoanAccount"] = "loan"
 
 NO_GROUP = -1
 BALANCE_DISPLAY_DEFAULT = 3  # value used by every account in the observed ledger
-ONLINE_FETCH_OFF = 0
+# A new credit card's second display mode (balanceCreditDisplayMode, stored as
+# infoDisplayMode): what every card MoneyWiz's own editor made in the observed ledger holds.
+CREDIT_INFO_DISPLAY_DEFAULT = 0
 # The delete dialog's "convert transfers" (MWAlertViewHelper confirmDeleteAccount:…):
 # runs before deleteAccount:, so the other accounts keep their balances.
 CONVERT_TRANSFERS = "convertAccountTransfersToExpensesAndIncomes:"
@@ -63,6 +65,11 @@ FIELDS = ["name", "info", "currencyName", "archived", "openingBalance", "display
           "includeInNetworth", "includeInGroupBalance", "clearTransactionOnCreation", "enableCheckbookRegister",
           "alertBalanceFallUnderAmount", "alertCreditCardsExpire", "creditLimit", "statementEndDay", "weekendOption",
           "balanceDisplayMode", "balanceDictionary"]
+# What an edit hands back unchanged. MoneyWiz's edit methods set every setting they
+# take, so one not passed back as stored is changed (online-banking switches turned
+# off, the cash date moved to now).
+EDIT_FIELDS = FIELDS + ["autoCategorizeOBTransactions", "autoCreateNewOBCategories", "autoDetectOBTransactionsPayees",
+                        "autoCreateNewOBPayees", "onlineBankBalanceFetchMode", "infoDisplayMode", "cashAsOfDate"]
 GROUP_FIELDS = ["name", "groupId", "groupObjectsType", "displayOrder", "colorNum", "groupCurrency", "isCollapsed"]
 ACCOUNT_GROUP_TYPE = 0
 
@@ -114,11 +121,12 @@ class Accounts:
             raise MoneyWizError(f"Account not found: {account_id}")
         return view(row)
 
-    def _raw(self, account_id: str) -> dict:
-        row = self.n.get("Account", account_id, FIELDS)
-        if row is None:
-            raise MoneyWizError(f"Account not found: {account_id}")
-        return row
+    def _stored(self, account_id: str) -> dict:
+        """The account as stored, undecoded ({"$date": seconds}), so an edit can hand back bit for bit."""
+        rows = self.n.query("Account", where=[["GID", "eq", s(account_id)]], fields=EDIT_FIELDS, limit=2, raw=True)["items"]
+        if len(rows) != 1:
+            raise MoneyWizError(f"Account not found: {account_id}" if not rows else f"Duplicate GID {account_id}")
+        return rows[0]
 
     def resolve(self, value: str) -> dict:
         """Accept an account id or an exact/unique name."""
@@ -154,10 +162,9 @@ class Accounts:
             raise MoneyWizError("name: text required")
         validator = cls("DataValidatorHelper")
         if account_id is None:
-            ok = self.n.invoke(validator, "validateAccountName:", [s(name)], save=False)["value"]
+            ok = self.n.ask(validator, "validateAccountName:", [s(name)])
         else:
-            ok = self.n.invoke(validator, "validateAccountEditName:forAccount:", [s(name), ref("Account", account_id)],
-                               save=False)["value"]
+            ok = self.n.ask(validator, "validateAccountEditName:forAccount:", [s(name), ref("Account", account_id)])
         if not ok:
             raise MoneyWizError(f"MoneyWiz rejects the account name {name!r}: it is empty or another account uses it")
 
@@ -178,7 +185,7 @@ class Accounts:
         if kind == "credit_card":
             limit = amount(credit_limit if credit_limit is not None else 0, field="credit_limit")
             args = [USER, s(name), s(note), n(float(limit)), n(float(opening)), s(currency), i(BALANCE_DISPLAY_DEFAULT),
-                    i(BALANCE_DISPLAY_DEFAULT), *common_tail, NIL, b(False),
+                    i(CREDIT_INFO_DISPLAY_DEFAULT), *common_tail, NIL, b(False),
                     ni(statement_end_day or 1), i(0)]  # statementEndDay is an NSNumber, weekendOption an int
         elif kind == "investment":
             when = parse_when(opening_date) if opening_date else None
@@ -196,52 +203,71 @@ class Accounts:
         return self.get(result["gid"])
 
     def update(self, account_id: str, **changes) -> dict:
-        row = self._raw(account_id)
-        current = view(row)
-        kind = current["kind"]
-        if kind == "loan":
-            raise MoneyWizError("Editing loan accounts is not supported yet (see STATUS.md)")
+        """Change some settings; every other one MoneyWiz's edit method takes is handed
+        back exactly as stored. Those methods set all they are given: budgets left out
+        stop monitoring the account (a budget left monitoring nothing is deleted), and
+        settings left out are reset."""
         unknown = set(changes) - {"name", "note", "opening_balance", "group_id", "icon", "include_in_networth",
                                   "include_in_group_balance", "auto_clear_transactions", "checkbook_register",
                                   "credit_limit", "statement_end_day", "low_balance_alert"}
         if unknown:
             raise MoneyWizError(f"Unknown account fields: {sorted(unknown)}")
-        name = changes.get("name", current["name"])
-        if name != current["name"]:
+        stored = self._stored(account_id)
+        row = decode(stored)
+        current = view(row)
+        kind = current["kind"]
+        if kind == "loan":
+            raise MoneyWizError("Editing loan accounts is not supported yet (see STATUS.md)")
+        name = changes.get("name", row.get("name"))
+        if name != row.get("name"):
             self._check_name(name, account_id)
-        note = changes.get("note", row.get("info") or "")
-        icon = changes.get("icon", row.get("iconFileName"))
         group_raw = changes.get("group_id", current.get("group_id"))
         group = ni(self.group(group_raw)["group_id"]) if group_raw is not None else ni(NO_GROUP)
-        opening = amount(changes.get("opening_balance", current.get("opening_balance") or 0),
-                         field="opening_balance")
-        alert = changes.get("low_balance_alert", row.get("alertBalanceFallUnderAmount"))
-        flags = [b(changes.get("auto_clear_transactions", current["auto_clear_transactions"])),
-                 b(changes.get("checkbook_register", current["checkbook_register"]))]
-        networth = [b(changes.get("include_in_networth", current["include_in_networth"])),
-                    b(changes.get("include_in_group_balance", current["include_in_group_balance"]))]
-        ob_flags = [b(False), b(False), b(False), b(False), i(ONLINE_FETCH_OFF)]
+
+        def number(change: str, column: str, default=None) -> dict:
+            """NSNumber: the new value, else the stored one as it is (nil stays nil)."""
+            if change in changes:
+                value = changes[change]
+                return NIL if value is None else n(float(amount(value, field=change)))
+            value = row.get(column)
+            value = default if value is None else value
+            return NIL if value is None else n(float(value))
+
+        def flag(change: str, column: str) -> dict:
+            return b(bool(changes[change]) if change in changes else bool(row.get(column)))
+
+        def integer(column: str, default: int = 0) -> dict:
+            return i(int(row[column]) if row.get(column) is not None else default)
+
+        head = [ref("Account", account_id), s(name), s(changes.get("note", row.get("info") or ""))]
+        clearing = [flag("auto_clear_transactions", "clearTransactionOnCreation"),
+                    flag("checkbook_register", "enableCheckbookRegister")]
+        totals = [flag("include_in_networth", "includeInNetworth"),
+                  flag("include_in_group_balance", "includeInGroupBalance")]
+        icon = opt_s(changes.get("icon", row.get("iconFileName")))
+        alerts = [number("low_balance_alert", "alertBalanceFallUnderAmount"), b(bool(row.get("alertCreditCardsExpire")))]
+        online = [b(bool(row.get(k))) for k in ("autoCategorizeOBTransactions", "autoCreateNewOBCategories",
+                                                 "autoDetectOBTransactionsPayees", "autoCreateNewOBPayees")] \
+            + [integer("onlineBankBalanceFetchMode")]
+        currency = s(row["currencyName"])
+        opening = number("opening_balance", "openingBalance", 0)
         _, _, edit_selector = KINDS[kind]
-        if kind == "credit_card":
-            limit = amount(changes.get("credit_limit", current.get("credit_limit") or 0),
-                           field="credit_limit")
-            args = [ref("Account", account_id), s(name), s(note), n(float(limit)), n(float(opening)), s(current["currency"]),
-                    i(row.get("balanceDisplayMode") or BALANCE_DISPLAY_DEFAULT), i(BALANCE_DISPLAY_DEFAULT), group, *flags,
-                    NIL, *networth, opt_s(icon),
-                    NIL if alert is None else n(float(amount(alert, field="low_balance_alert"))),
-                    b(bool(row.get("alertCreditCardsExpire"))), *ob_flags,
-                    ni(changes.get("statement_end_day", row.get("statementEndDay") or 1)), i(row.get("weekendOption") or 0)]
-        elif kind == "investment":
-            args = [ref("Account", account_id), s(name), s(note), n(float(opening)), NIL, s(current["currency"]), group,
-                    *flags, *networth, opt_s(icon), *ob_flags]
-        elif kind == "forex":
-            args = [ref("Account", account_id), s(name), s(note), s(current["currency"]), group, *flags, *networth,
-                    opt_s(icon), *ob_flags]
+        if kind in ("investment", "forex"):
+            cash = [opening, {"date": stored["cashAsOfDate"]["$date"]} if stored.get("cashAsOfDate") else NIL] \
+                if kind == "investment" else []
+            args = [*head, *cash, currency, group, *clearing, *totals, icon, *online]
         else:
-            args = [ref("Account", account_id), s(name), s(note), n(float(opening)), s(current["currency"]),
-                    i(row.get("balanceDisplayMode") or BALANCE_DISPLAY_DEFAULT), group, *flags, NIL, *networth, opt_s(icon),
-                    NIL if alert is None else n(float(amount(alert, field="low_balance_alert"))),
-                    b(bool(row.get("alertCreditCardsExpire"))), *ob_flags]
+            # The budgets that monitor it, as MoneyWiz's setBudgets:toAccount: compares them.
+            budgets = arr(ref("Budget", x["gid"]) for x in self.n.ask("manager", "budgetsForAccount:",
+                                                                       [ref("Account", account_id)]) or [])
+            display = integer("balanceDisplayMode", BALANCE_DISPLAY_DEFAULT)
+            if kind == "credit_card":
+                end_day = changes["statement_end_day"] if "statement_end_day" in changes else row.get("statementEndDay")
+                args = [*head, number("credit_limit", "creditLimit", 0), opening, currency, display,
+                        integer("infoDisplayMode", CREDIT_INFO_DISPLAY_DEFAULT), group, *clearing, budgets, *totals,
+                        icon, *alerts, *online, ni(end_day if end_day is not None else 1), integer("weekendOption")]
+            else:
+                args = [*head, opening, currency, display, group, *clearing, budgets, *totals, icon, *alerts, *online]
         self.n.invoke("manager", edit_selector, args)
         return self.get(account_id)
 

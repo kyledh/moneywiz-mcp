@@ -6,7 +6,7 @@ offers, what it fills in by default and what it passes to the manager.
 """
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 from urllib.parse import unquote
 
 from .accounts import Accounts
@@ -14,7 +14,7 @@ from .catalog import Catalog
 from .native import Native, MoneyWizError, s, n, i, d, b, ni, ref, arr, cls, date, NIL, USER, currency_code
 from .scheduled import UNITS, UNIT_NAMES
 from .settings import Settings
-from .values import amount, clean, day_start, local_tz, money, parse_when, show_date, stored
+from .values import amount, clean, day_start, local_time, money, next_day_start, parse_when, show_date, stored, today
 
 KINDS = {"expense": 0, "income": 1}
 KIND_NAMES = {v: k for k, v in KINDS.items()}
@@ -106,7 +106,7 @@ class Budgets:
     def _period(self, budget_id: str, index: int) -> dict:
         """The amounts of one period, as MoneyWiz computes them."""
         def call(selector):
-            return self.n.invoke(ref("Budget", budget_id), selector, [{"i": index}], save=False)["value"]
+            return self.n.ask(ref("Budget", budget_id), selector, [{"i": index}])
         return clean({
             "number": index,
             "budgeted": money(call("openingBalanceForPeriodIndex:")),
@@ -164,8 +164,7 @@ class Budgets:
         # MoneyWiz's own rule for budget names (DataValidatorHelper).
         if not isinstance(name, str):
             raise MoneyWizError("name: text required")
-        ok = self.n.invoke(cls("DataValidatorHelper"), "validateBudgetName:", [s(name)],
-                           save=False)["value"]
+        ok = self.n.ask(cls("DataValidatorHelper"), "validateBudgetName:", [s(name)])
         if not ok:
             raise MoneyWizError(f"MoneyWiz rejects the budget name {name!r}")
 
@@ -176,13 +175,13 @@ class Budgets:
             tags = [tags]
         known = {t["id"]: t["name"] for t in self.catalog.tags()}
         names = [known.get(t, t) for t in tags]
-        predicate = self.n.invoke(cls("TagsPredicate"), "ORPredicateStringFromTagsNames:", [arr(s(x) for x in names)], save=False)["value"]
+        predicate = self.n.ask(cls("TagsPredicate"), "ORPredicateStringFromTagsNames:", [arr(s(x) for x in names)])
         return s(predicate) if predicate else NIL
 
     def _accounts(self, accounts) -> dict:
         if accounts is None:
             # The editor's default: every non-investment account.
-            rows = self.n.invoke("user", "nonInvestmentAccountsArray", [], save=False)["value"] or []
+            rows = self.n.ask("user", "nonInvestmentAccountsArray", []) or []
             return arr(ref("Account", r["gid"]) for r in rows)
         return arr(ref("Account", self.accounts.resolve(a)["id"]) for a in accounts)
 
@@ -207,7 +206,7 @@ class Budgets:
         return every, units
 
     def _limit_reached(self) -> bool:
-        return bool(self.n.invoke("manager", "isBudgetsLimitReached", [], save=False)["value"])
+        return bool(self.n.ask("manager", "isBudgetsLimitReached", []))
 
     # ------------------------------------------------------------ writes
 
@@ -223,17 +222,14 @@ class Budgets:
         self._check_name(name)
         value = amount(amount_, field="amount")
         code = currency_code(self.n, currency or self.settings.currencies().get("default_currency"))
-        if start_date:
-            start = day_start(start_date, field="start_date")
-        else:  # the editor's default: the first day of the current month
-            today = datetime.now(local_tz()).date()
-            start = datetime.combine(today.replace(day=1), time(0, 0), tzinfo=local_tz())
+        # The editor's default start: the first day of the current month.
+        start = day_start(start_date, field="start_date") if start_date else local_time(today().replace(day=1))
         head = [USER, i(KINDS[kind]), s(name), s(DESC)]
         monitored = [self._accounts(accounts), self._categories(categories), self._tags(tags)]
         if repeat == "none":
             if not end_date:
                 raise MoneyWizError("A one-time budget needs end_date")
-            end = day_start(end_date, field="end_date") + timedelta(days=1)  # stored as the start of the next day
+            end = next_day_start(end_date, field="end_date")  # stored as the start of the next day
             args = head + [n(float(value)), s(code), *monitored, date(start), date(end), self._group_id(group),
                            s(icon) if icon else NIL]
             result = self.n.invoke("manager", CREATE_ONCE, args, quiet=BUDGET_NOTICE)
@@ -283,7 +279,7 @@ class Budgets:
 
         if repeat == "none":
             if changes.get("end_date"):
-                end = date(day_start(changes["end_date"], field="end_date") + timedelta(days=1))
+                end = date(next_day_start(changes["end_date"], field="end_date"))
             elif row.get("endDate"):
                 end = {"date": datetime.fromisoformat(row["endDate"]).timestamp()}
             else:
@@ -304,7 +300,7 @@ class Budgets:
             else:
                 # The current period's own amount, applied to it alone, changes nothing.
                 index = row.get("currentPeriodNumber") or 0
-                stored_amount = self.n.invoke(ref("Budget", budget_id), "openingBalanceForPeriodIndex:", [{"i": index}], save=False)["value"]
+                stored_amount = self.n.ask(ref("Budget", budget_id), "openingBalanceForPeriodIndex:", [{"i": index}])
                 value, mask = float(stored_amount or 0), PERIODS["current"]
             rollover = bool(changes.get("rollover", row.get("isPeriodMoneyTransferEnabled")))
             # The editor passes its rollover switch for both transfer flags when editing.
@@ -357,7 +353,8 @@ class Budgets:
         after, deleted_group = self._orders(), before[row["gid"]][0]
         restored = 0
         for group_id in {g for g, _ in before.values() if g != deleted_group}:
-            members = sorted((o, gid) for gid, (g, o) in before.items() if g == group_id and gid in after)
+            members = sorted(((o if o is not None else -1), gid) for gid, (g, o) in before.items()
+                             if g == group_id and gid in after)
             if all(after[gid][1] == o for o, gid in members):
                 continue
             self._place("Budget", [gid for _, gid in members], "Budget display order changed")

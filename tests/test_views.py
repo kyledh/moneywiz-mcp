@@ -1,4 +1,5 @@
 """The row -> tool-output mapping, on rows shaped exactly like the agent's."""
+from decimal import Decimal
 from datetime import datetime, timezone
 
 from moneywiz_mcp.accounts import view as account_view
@@ -6,7 +7,7 @@ from moneywiz_mcp.budgets import decode_tags, view as budget_view
 from moneywiz_mcp.native import decode
 from moneywiz_mcp.scheduled import view as scheduled_view
 from moneywiz_mcp.transactions import view as transaction_view
-from moneywiz_mcp.values import local_tz
+from moneywiz_mcp.transactions import given, holding_args
 
 
 def test_account_view_maps_balance_and_kind():
@@ -103,7 +104,7 @@ def test_budget_view_and_tag_filter():
     assert view["tags"] == ["旅行", "trip"] and view["tags_match"] == "any" and "tag_filter" not in view
     assert view["current_period"]["remaining"] == "-20" and "amount" not in view
     # Stored as local midnight of the day after the last day (whatever the machine's zone is).
-    next_day = datetime(2026, 12, 1, tzinfo=local_tz()).astimezone(timezone.utc).isoformat()
+    next_day = datetime(2026, 12, 1).astimezone().astimezone(timezone.utc).isoformat()
     once = budget_view(row | {"isRepeatable": 0, "type": 1, "endDate": next_day, "tagsPredicateToMonitor": None})
     assert once["kind"] == "income" and once["amount"] == "100" and "repeat" not in once and "rollover" not in once
     assert once["end_date"].startswith("2026-11-30T23:59:59")
@@ -235,3 +236,21 @@ def test_report_data_checks_every_agent_call_against_the_table():
     assert all(len(entry) == 3 and entry[2] for entry in listed)
     assert ("CustomReport", "- setReportSortingType:") in calls.object_calls()
     assert "forkToChildManagedObjectContext" in calls.manager_selectors()
+
+
+def test_edits_give_back_stored_figures_as_moneywiz_editors_give_them():
+    # An expense is stored negated, an income as given: -5 given as an income stays -5,
+    # and an expense stored as +5 (given -5) goes back as -5.
+    assert given(-5.0, 1) == Decimal("-5") and given(5.0, -1) == Decimal("-5")
+    assert given(-12.5, -1) == Decimal("12.5") and given(None, -1) == Decimal(0)
+    assert str(given(0.0, -1)) == "0.0", "no negative zero"
+    assert given(0.1 + 0.2, 1) == Decimal("0.30000000000000004"), "exact, not rounded"
+
+
+def test_edits_keep_the_position_a_transaction_is_booked_against():
+    # An expense of 5 USD from a forex position stores -5 shares, as its amount.
+    assert holding_args({"investmentSymbol": None, "symbol": "USD", "numberOfShares": -5.0}, -1) == \
+        [{"nil": True}, {"s": "USD"}, {"n": 5.0}]
+    assert holding_args({"symbol": "USD", "numberOfShares": 5.0}, 1)[2] == {"n": 5.0}
+    # What MoneyWiz stores for a plain transaction goes back the same way.
+    assert holding_args({"numberOfShares": 0.0}, -1) == [{"nil": True}, {"nil": True}, {"n": 0.0}]

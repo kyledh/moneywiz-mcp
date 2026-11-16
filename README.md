@@ -85,8 +85,10 @@ GUI apps may not see your shell's `PATH`; if the command is not found, use the
 absolute path from `which moneywiz-mcp` or `which uvx`.
 
 Then ask the client to call `moneywiz_status`: it reports the app version, the
-open database and ledger totals. The server reconnects by itself after MoneyWiz
-restarts.
+open database and ledger totals. The server reconnects by itself on the next
+call after MoneyWiz restarts. A call that loses the connection while MoneyWiz
+handles it (MoneyWiz quit or crashed) is reported and never sent again: it may
+have been carried out, so check the ledger before repeating it.
 
 ### MoneyWiz in the background
 
@@ -143,6 +145,8 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
   and totals are rounded to 8 decimals to drop the noise of summing doubles.
 * **Dates** accept `YYYY-MM-DD` (local noon, so the day never shifts) or a full
   ISO 8601 timestamp. Output is local time. List ranges are `[start, end)`.
+  Each date takes its own day's offset, so days on the other side of a
+  daylight-saving change stay whole.
 * **Accounts** by id or exact name; **categories** by id or full path
   (`"Food/Coffee"`).
 * **Category splits** are a list of categories and amounts:
@@ -153,7 +157,15 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
   a new list. Refunds normally use the expense's category, as in MoneyWiz.
 * **Foreign currency**: give `original_amount` + `original_currency` alongside
   the amount in the account's currency; the rate is derived, or pass
-  `exchange_rate`.
+  `exchange_rate`. Changing only the amount keeps the foreign amount and
+  derives the new rate.
+* **Edits change only what you pass.** Everything else goes back to MoneyWiz
+  exactly as stored, because its edit methods set all they are given: an
+  account keeps the budgets that monitor it, its online-banking switches,
+  display modes and cash date; a transaction keeps a negative amount, a
+  transfer's fee, the forex position or holding it is booked against, and its
+  time to the microsecond; a trade keeps its share count, price and commission
+  at full precision.
 * **Transfers** create, edit and delete both legs together. Across currencies,
   give `transfer_amount` (what arrives) or `transfer_exchange_rate`. MoneyWiz's
   "transfer between A and B succeeded" dialog is skipped for transfers made
@@ -257,7 +269,7 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
   tool's result instead.
 * Writes wait while MoneyWiz has unsaved changes of its own and are refused if
   they persist for 5 seconds (an open editor), so a half-finished entry is
-  never committed for you. Deletions that arrived from another device through
+  never committed for you. Reads work all the while. Deletions that arrived from another device through
   iCloud, which MoneyWiz holds unsaved although they are already stored, do
   not count.
 * Deleting an account deletes its transactions, so the tool refuses unless you

@@ -275,9 +275,13 @@ function count(e, spec) {
 
 // ---------------------------------------------------------------- field reads
 
+// What valueForKey: can box from a getter: objects, classes, scalars, structs.
+// For a pointer, selector, union or void it raises, and that would abort MoneyWiz.
+const KVC_RETURN = /^[rnNoORV]*[@#cCsSiIlLqQfdB{]/;
+
 // Read one key. Model properties go through KVC; other keys must name an
 // argument-less method the object responds to (computed values such as
-// balances), so valueForKey: never raises for an undefined key.
+// balances) whose return type KVC can box, so valueForKey: never raises.
 function readKey(o, key) {
   if (key === '$entity') return kindOf(o, C.NSManagedObject) ? o.entity().name() : null;
   if (key === '$class') return nsString(o.$className);
@@ -287,6 +291,7 @@ function readKey(o, key) {
   if (o.respondsToSelector_(ObjC.selector(key))) {
     const method = o[key];
     need(method && method.argumentTypes.length === 2, 'Not an argument-less getter: ' + key);
+    need(KVC_RETURN.test(method.types), `${o.$className} ${key} returns ${method.types}, which cannot be read`);
     return o.valueForKey_(nsString(key));
   }
   return undefined; // property does not exist on this concrete object
@@ -345,7 +350,9 @@ function target(e, spec) {
   fail('Unknown invocation target');
 }
 
-function invokeOn(e, spec) {
+// Call one method. Returns what it returned and its return type, unconverted,
+// so a caller can save what the call changed before anything else can fail.
+function callOn(e, spec) {
   const receiver = target(e, spec.target);
   const selector = spec.selector;
   need(typeof selector === 'string' && /^[A-Za-z_][A-Za-z0-9_:]*$/.test(selector), 'Invalid selector');
@@ -370,10 +377,17 @@ function invokeOn(e, spec) {
   });
   const result = method.apply(receiver, values);
   if (e.produced && types[0] === '@') e.produced.push(isNil(result) ? null : result);
-  if (types[0] === 'v') return null;
-  if (types[0] === '@') return isNil(result) ? null : (kindOf(result, C.NSManagedObject) ? serialize(result, spec.fields) : toJS(result));
+  return { result, type: types[0] };
+}
+
+function present(called, fields) {
+  const { result, type } = called;
+  if (type === 'v') return null;
+  if (type === '@') return isNil(result) ? null : (kindOf(result, C.NSManagedObject) ? serialize(result, fields) : toJS(result));
   return result;
 }
+
+function invokeOn(e, spec) { return present(callOn(e, spec), spec.fields); }
 
 function changeSummary(set) {
   const out = {}, array = set.allObjects(), n = Number(array.count());
@@ -501,6 +515,37 @@ function pendingObjects(e) {
   for (let i = 0; i < Number(inserted.count()); i++) out.push(inserted.objectAtIndex_(i));
   const { live, gone } = splitDeleted(e);
   return out.concat(realUpdates(e, gone), live);
+}
+
+// What is pending, object by object with the keys it changed, to tell what one
+// call added to it.
+function pendingKeys(e) {
+  return new Set(pendingObjects(e).map(o => {
+    const keys = o.changedValues().allKeys(), names = [];
+    for (let i = 0; i < Number(keys.count()); i++) names.push(keys.objectAtIndex_(i).toString());
+    return `${uri(o)} ${names.sort().join(',')}`;
+  }));
+}
+
+// A method that only answers a question (a validator, a computed figure). It
+// may run while the app holds unsaved changes, because nothing is saved, but
+// it must not add any: a later save would commit them (a report calculated in
+// the main context records scheduled transactions, for one). When the context
+// held nothing at all before, what the call left is exactly its own and is
+// rolled back; otherwise it cannot be told apart and stays. Either way the
+// answer is refused, by name.
+function answer(e, spec) {
+  const hadChanges = Boolean(e.context.hasChanges()), before = hadChanges ? pendingKeys(e) : new Set();
+  const called = callOn(e, spec);
+  if (!e.context.hasChanges()) return { value: present(called, spec.fields) };
+  const added = [...pendingKeys(e)].filter(k => !before.has(k));
+  if (added.length === 0) return { value: present(called, spec.fields) };
+  if (!hadChanges) e.context.rollback();
+  const error = new Error(`MoneyWiz changed ${added.length} objects while answering ${spec.selector}; ` +
+    (hadChanges ? 'they are left unsaved, next to changes of its own' : 'that was undone') +
+    '. Treat this method as a write.');
+  error.name = 'ReadChangedData';
+  throw error;
 }
 
 // A business method saves the whole context, so writing while the app holds
@@ -743,19 +788,35 @@ rpc.exports = {
 
   count(spec) { return onMain(() => count(env(), spec)); },
 
-  // spec: {target, selector, args, encoding?, fields?, save?, allow_dirty?}
+  // spec: {target, selector, args, encoding?, fields?, save?, quiet?, read_only?}
+  // A write is refused while the app holds unsaved changes. Once the business
+  // method has run, what it left unsaved is saved (inside the same quiet
+  // window) before its result is read, so a failure reading the result can
+  // neither lose the write nor leave it pending.
   invoke(spec) {
     return onMain(() => {
       const e = env();
+      if (spec.read_only) return answer(e, spec);
       const before = contextState(e);
-      if (!spec.allow_dirty) requireClean(e, before);
+      requireClean(e, before);
       captured = [];
-      const value = quietly(spec, () => invokeOn(e, spec));
-      const after = contextState(e);
-      const out = { value, context_before: before, context_after: after };
+      let after = null, saved;
+      const called = quietly(spec, () => {
+        const result = callOn(e, spec);
+        after = contextState(e);
+        if (spec.save && after.pending > 0) saved = save(e);
+        return result;
+      });
+      const out = { context_before: before, context_after: after };
+      if (saved) out.save = saved;
       const notices = takeNotices();
       if (notices.length) out.notices = notices;
-      if (spec.save && after.pending > 0) out.save = save(e);
+      try {
+        out.value = present(called, spec.fields);
+      } catch (err) {
+        fail(`MoneyWiz carried out ${spec.selector}${saved && saved.saved ? ' and saved it' : ''}, ` +
+             `but its result could not be read (${err.message}); check the app before repeating it`);
+      }
       return out;
     });
   },

@@ -3,7 +3,8 @@
 Used by scripts/check_build.py to compare a MoneyWiz build with the recorded
 one, and by the offline tests to make sure every call has a recorded
 signature. Calls are found by reading every `.invoke(target, selector, ...)`
-in the domain modules; selectors held in module constants count as well.
+and `.ask(target, selector, ...)` in the domain modules; selectors held in
+module constants count as well.
 """
 from __future__ import annotations
 
@@ -18,7 +19,8 @@ MODULES = (accounts, backups, budgets, catalog, investments, lifecycle, portfoli
 
 # Field lists read with native.query(), by the entity they are read from.
 FIELD_LISTS = {
-    "Account": [accounts.FIELDS], "Group": [accounts.GROUP_FIELDS, budgets.GROUP_FIELDS, reports.GROUP_FIELDS],
+    "Account": [accounts.FIELDS, accounts.EDIT_FIELDS],
+    "Group": [accounts.GROUP_FIELDS, budgets.GROUP_FIELDS, reports.GROUP_FIELDS],
     "Transaction": [transactions.FIELDS], "InvestmentExchangeTransaction": [transactions.EXCHANGE_FIELDS],
     "Category": [catalog.CATEGORY_FIELDS],
     "ScheduledTransactionHandler": [scheduled.FIELDS], "Budget": [budgets.FIELDS],
@@ -87,7 +89,7 @@ def _local_targets(tree) -> dict[str, tuple[str, str]]:
 
 
 def invocations() -> list[dict]:
-    """Every `.invoke(...)` in the domain modules, with what could be resolved."""
+    """Every `.invoke(...)` and `.ask(...)` in the domain modules, with what could be resolved."""
     found = []
     for module in MODULES:
         constants, tree = _strings(module), ast.parse(inspect.getsource(module))
@@ -103,8 +105,8 @@ def invocations() -> list[dict]:
                 if "target" not in keys or "selector" not in keys:
                     continue
                 target_node, selector = keys["target"], keys["selector"]
-            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "invoke" \
-                    and len(node.args) >= 2:
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                    and node.func.attr in ("invoke", "ask") and len(node.args) >= 2:
                 target_node, selector = node.args[0], node.args[1]
             else:
                 continue

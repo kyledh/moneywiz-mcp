@@ -9,9 +9,9 @@ starting values (`tests/test_live.py`).
 
 | Area | Read | Write | Verified live |
 | --- | --- | --- | --- |
-| Accounts | yes | create, update, archive/unarchive, move, delete (optionally converting its transfers, as MoneyWiz's delete dialog offers) | cash, checking, savings, credit card, investment, forex; deleting an account with transfers both ways, converted (the other account's balance unchanged, a pending leg still pending, an attachment kept) and not converted (both legs gone) |
+| Accounts | yes | create, update, archive/unarchive, move, delete (optionally converting its transfers, as MoneyWiz's delete dialog offers) | cash, checking, savings, credit card, investment, forex; deleting an account with transfers both ways, converted (the other account's balance unchanged, a pending leg still pending, an attachment kept) and not converted (both legs gone); a rename of each kind keeps every other stored setting (online-banking switches, display modes, cash date, limits) and the budgets that monitor it, including a budget that monitors only that account |
 | Account groups | yes | create, update (incl. membership), delete, reorder | yes |
-| Transactions | yes | expense, income, transfer, refund: create, update, delete; one purchase, income or refund across several accounts; budget transfers: update; an income turned into a refund of an expense; many at once: status, delete | single and split categories, foreign currency, fees, cheque numbers, tags, both transfer legs, cross-currency transfers, refund links, a split across two accounts for each kind, a budget transfer's amount, an income with an attachment, tags and reconciled state turned into a refund (categories in proportion), status and delete for a selection with a transfer and a refund |
+| Transactions | yes | expense, income, transfer, refund: create, update, delete; one purchase, income or refund across several accounts; budget transfers: update; an income turned into a refund of an expense; many at once: status, delete | single and split categories, foreign currency, fees, cheque numbers, tags, both transfer legs, cross-currency transfers, refund links, a split across two accounts for each kind, a budget transfer's amount, an income with an attachment, tags and reconciled state turned into a refund (categories in proportion), status and delete for a selection with a transfer and a refund; memo-only edits of a negative income, expense and refund, an expense and an income with a fee, a transfer with a fee in one currency and across two, a foreign-currency expense, an expense booked against a forex position and one timed to a fraction of a second leave every stored value of both legs as it was; a new amount on a foreign-currency expense keeps the foreign amount and gives the rate |
 | Attachments | listed per transaction, file written on request | add (image or PDF), remove; kept by every edit | two receipts added, one read back byte for byte, kept through an expense and a transfer edit (both legs), one removed, the rest deleted with the transaction (MoneyWiz removes its copies) |
 | Transaction state | yes | cleared/pending, reconciled, void, for one transaction or a list | yes |
 | Balance adjustments (reconcile transactions) | balance set, difference booked | adjust to a balance on a date (cash, bank, credit card, investment cash; forex per currency), delete | end-of-day dating against a same-day expense, a second adjustment after later activity, delete restores the balance, forex position created and priced by MoneyWiz |
@@ -154,6 +154,20 @@ iCloud sync stay with MoneyWiz.
 * MoneyWiz's edit methods set a transaction's attachments to exactly the list
   they are given, so every edit passes the current ones. Up to 0.1.4 edits
   passed none, which would have removed them.
+* The same holds for everything else an edit method takes (ARCHITECTURE,
+  rule 13), so edits hand every value they are not given back as stored.
+  Up to 0.1.7 they did not, all verified on sandbox copies before the fix:
+  renaming an account through `update_account` took it out of every budget
+  that monitored it (`setBudgets:toAccount:` with nil; a budget left
+  monitoring nothing was deleted), turned its four online-banking switches
+  off and moved an investment account's cash date to the time of the edit;
+  a memo-only `update_transaction` flipped a negative income, expense or
+  refund, added a transfer's fee to its amount once more (both legs moved),
+  unlinked an expense or income from its forex position (the position's
+  balance changed) and cut its time to the second; changing a foreign-currency
+  expense's amount dropped its foreign amount; trade edits rounded shares,
+  price and commission to 15 digits. New credit cards take the second display
+  mode MoneyWiz's own cards have (0, not 3).
 * A report's figures are computed in a child context that is discarded,
   as MoneyWiz does when it shows a report (see ARCHITECTURE). For a report
   that counts scheduled transactions (a forecast does by default), MoneyWiz
@@ -162,6 +176,10 @@ iCloud sync stay with MoneyWiz.
   report has no account filter in MoneyWiz and always covers every account.
 * Saved locally is not synced; MoneyWiz uploads to iCloud on its own schedule.
 * Several calls are not atomic: each business call saves independently.
+* A call whose connection is lost while MoneyWiz handles it (MoneyWiz quit or
+  crashed) is reported and not sent again; up to 0.1.7 it was sent again
+  after reconnecting (and relaunching MoneyWiz), which could record a write
+  twice.
 * Signatures are recorded from build 466. On another build, any call whose
   signature changed fails with an explicit error; reads and unchanged methods
   keep working. `scripts/check_build.py` lists, before anything fails, every
