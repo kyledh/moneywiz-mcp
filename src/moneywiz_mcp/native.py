@@ -53,7 +53,9 @@ class Native:
     def _connect(self):
         pid = self._find_pid()
         if pid is None and self._launch:
-            subprocess.run(["open", "-g", "-a", APP_PATH], check=False)
+            # -g: do not bring it to the front; -j: launch it hidden, so an MCP
+            # call does not put MoneyWiz's window on screen.
+            subprocess.run(["open", "-g", "-j", "-a", APP_PATH], check=False)
             for _ in range(60):
                 time.sleep(1)
                 if (pid := self._find_pid()) is not None:

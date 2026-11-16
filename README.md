@@ -89,11 +89,13 @@ open database and ledger totals. If MoneyWiz is not running you get a clear
 error; open the app and retry. The server reconnects by itself after MoneyWiz
 restarts.
 
-To let the server open MoneyWiz (in the background) when it is not running,
-set `MONEYWIZ_LAUNCH=1`: `claude mcp add --scope user -e MONEYWIZ_LAUNCH=1
-moneywiz -- moneywiz-mcp`, or `"env": {"MONEYWIZ_LAUNCH": "1"}` in a JSON
-config. The first call then waits for the app and its ledger and returns in a
-few seconds. A ledger behind a passcode still has to be unlocked by hand.
+To let the server open MoneyWiz when it is not running, set
+`MONEYWIZ_LAUNCH=1` (`claude mcp add --scope user -e MONEYWIZ_LAUNCH=1 moneywiz
+-- moneywiz-mcp`, or `"env": {"MONEYWIZ_LAUNCH": "1"}` in a JSON config).
+MoneyWiz is then launched hidden: no window appears and focus stays where it
+is (click its Dock icon to show it). The first call waits for the ledger and
+returns in a few seconds. A MoneyWiz you already have open is left as it is,
+and a ledger behind a passcode still has to be unlocked by hand.
 
 ## Tools
 
@@ -145,6 +147,9 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
 
 * Every input is validated before MoneyWiz is touched, because an exception
   raised inside the app would terminate it.
+* Writes are silent: no dialogs, notifications, sounds, progress overlays or
+  window activation (traced across every write tool on build 466). The one
+  dialog MoneyWiz raises in reaction, "transfer succeeded", is skipped.
 * Writes wait while MoneyWiz has unsaved changes of its own and are refused if
   they persist for 5 seconds (an open editor), so a half-finished entry is
   never committed for you.

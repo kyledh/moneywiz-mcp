@@ -67,3 +67,13 @@ iCloud sync stay with MoneyWiz.
 * Only build 466's `MoneyWizManager` signatures are recorded. On another build,
   any call whose signature changed fails with an explicit error; reads and
   unchanged methods keep working.
+
+## Silence
+
+On build 466 every write tool was run under a tracer hooked to alert
+presentation (`presentViewController:`, `MWAlertViewHelper`), `MBProgressHUD`,
+user notifications, sounds, window ordering and activation, and URL opening.
+The only reaction was the "transfer succeeded" alert, which the server skips
+for its own transfers. `set_default_currency` was not exercised, to leave
+the ledger's currency alone. With `MONEYWIZ_LAUNCH=1` the app is started
+hidden (`open -g -j`).
