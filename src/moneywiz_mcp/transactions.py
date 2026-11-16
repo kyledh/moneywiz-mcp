@@ -6,7 +6,7 @@ from decimal import Decimal
 from .accounts import Accounts
 from .catalog import Catalog
 from .native import Native, MoneyWizError, s, n, ni, nb, b, ref, arr, date, opt_s, NIL
-from .values import amount, money, parse_when, parse_bound, show_date, clean
+from .values import amount, parse_when, parse_bound, show_date, clean, stored
 
 # Transaction.status: MoneyWiz marks a record pending or cleared; "reconciled"
 # is a separate flag, and cheque voiding a third.
@@ -89,7 +89,7 @@ def view(row: dict) -> dict:
         "id": row["gid"],
         "kind": kind,
         "date": show_date(row.get("date")),
-        "amount": money(row.get("amount")),
+        "amount": stored(row.get("amount")),
         "currency": row.get("account.currencyName"),
         "description": row.get("desc"),
         "memo": row.get("notes") or None,
@@ -100,14 +100,14 @@ def view(row: dict) -> dict:
         "payee": row.get("payee.name"),
         "payee_id": row.get("payee.GID"),
         "tags": row.get("tags.name") or None,
-        "categories": [{"id": cid, "name": name, "amount": money(value)} for cid, name, value in categories] or None,
-        "fee": money(row.get("fee")) if row.get("fee") else None,
+        "categories": [{"id": cid, "name": name, "amount": stored(value)} for cid, name, value in categories] or None,
+        "fee": stored(row.get("fee")) if row.get("fee") else None,
         "cheque_number": row.get("checkbookNumber") or None,
         "attachments": len(row.get("images.GID") or []) or None,
     }
     if row.get("originalCurrency") and row.get("originalCurrency") != row.get("account.currencyName"):
-        out["original"] = {"currency": row.get("originalCurrency"), "amount": money(row.get("originalAmount")),
-                           "exchange_rate": money(row.get("originalExchangeRate"))}
+        out["original"] = {"currency": row.get("originalCurrency"), "amount": stored(row.get("originalAmount")),
+                           "exchange_rate": stored(row.get("originalExchangeRate"))}
     if row.get("voidCheque"):
         out["void"] = True
     if kind == "transfer_out":
@@ -124,8 +124,8 @@ def view(row: dict) -> dict:
         out["refunded_by_ids"] = row["refundTransactionsLinks.refundTransaction.GID"]
     if row.get("investmentHolding.symbol"):
         out["symbol"] = row["investmentHolding.symbol"]
-        out["shares"] = money(row.get("numberOfShares"))
-        out["price_per_share"] = money(row.get("pricePerShare"))
+        out["shares"] = stored(row.get("numberOfShares"))
+        out["price_per_share"] = stored(row.get("pricePerShare"))
     return clean(out) | {"reconciled": out["reconciled"]}
 
 
@@ -211,7 +211,9 @@ class Transactions:
             return NIL, NIL, []
         if isinstance(categories, (str, dict)):
             categories = [categories]
-        wanted = "income" if kind in ("income", "refund") else "expense"
+        # A refund returns money to what was spent on, so MoneyWiz files it
+        # under expense categories, like the expense it refunds.
+        wanted = "income" if kind == "income" else "expense"
         resolved, amounts = [], []
         for entry in categories:
             if isinstance(entry, str):
@@ -406,7 +408,7 @@ class Transactions:
             target = self.accounts.resolve(changes["transfer_to"]) if changes.get("transfer_to") else \
                 self.accounts.resolve(current["transfer_to_id"])
             other = self.n.get("Transaction", current["other_leg_id"], ["amount", "date"]) if current.get("other_leg_id") else None
-            received_now = abs(Decimal(money(other["amount"]))) if other else value
+            received_now = abs(Decimal(stored(other["amount"]))) if other else value
             received_when = parse_when(changes["receive_date"], field="receive_date") if changes.get("receive_date") \
                 else (parse_when(show_date(other["date"])) if other else when)
             if changes.get("transfer_amount") is not None:
@@ -441,7 +443,7 @@ class Transactions:
         else:
             original_amount = original_currency = exchange_rate = None
         currency, original, rate, _ = self._fx(fx_source, value, original_amount, original_currency, exchange_rate)
-        cats, monies, _ = self._splits(categories, value, "income" if kind in ("income", "refund") else "expense")
+        cats, monies, _ = self._splits(categories, value, kind)
         tail = [cats, monies, opt_s(cheque), NIL, s(memo), self._tags(tags), NIL, NIL, NIL]
         if kind == "expense":
             args = [ref("Transaction", transaction_id), ref("Account", account["id"]), s(description),

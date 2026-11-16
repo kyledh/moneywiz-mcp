@@ -7,7 +7,10 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN
 
 from .native import MoneyWizError
 
-_AMOUNT = re.compile(r"^-?\d{1,15}(\.\d{1,8})?$")
+_AMOUNT = re.compile(r"^-?\d{1,15}(\.\d{1,20})?$")
+# MoneyWiz stores amounts as IEEE doubles, which hold 15 significant decimal
+# digits exactly. More would be silently rounded, so they are refused.
+SIGNIFICANT = 15
 
 
 def amount(value, *, field: str = "amount", allow_zero: bool = False, allow_negative: bool = False) -> Decimal:
@@ -21,6 +24,11 @@ def amount(value, *, field: str = "amount", allow_zero: bool = False, allow_nega
         result = Decimal(text)
     except InvalidOperation as exc:  # pragma: no cover - regex already guards
         raise MoneyWizError(f"{field}: invalid number {value!r}") from exc
+    digits = result.as_tuple().digits
+    significant = len("".join(map(str, digits)).lstrip("0")) or 1
+    if significant > SIGNIFICANT:
+        raise MoneyWizError(f"{field}: {value!r} has {significant} significant digits; MoneyWiz stores at most "
+                            f"{SIGNIFICANT}, so round it first")
     if result < 0 and not allow_negative:
         raise MoneyWizError(f"{field} must not be negative (direction comes from the transaction kind)")
     if result == 0 and not allow_zero:
@@ -28,8 +36,31 @@ def amount(value, *, field: str = "amount", allow_zero: bool = False, allow_nega
     return result
 
 
+def stored(value) -> str | None:
+    """Format one stored field (an amount, fee, price, share count or rate).
+
+    Rounded to the 15 significant digits a double holds, which keeps every
+    digit that was written and drops the noise of a single multiplication
+    (10 x 25.1 = 251.00000000000003 reads as 251).
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    number = float(value)
+    if number == 0:
+        return "0"
+    d = Decimal(repr(number))
+    d = d.quantize(Decimal(1).scaleb(d.adjusted() - SIGNIFICANT + 1), rounding=ROUND_HALF_EVEN).normalize()
+    return format(d, "f")
+
+
 def money(value) -> str | None:
-    """Format a stored double as a short decimal string (stored values are IEEE doubles)."""
+    """Format a computed value such as a balance or total.
+
+    Sums of doubles carry absolute noise (a cleared balance of
+    4.547473508864641e-13), so these are rounded to 8 decimals.
+    """
     if value is None:
         return None
     if isinstance(value, str):

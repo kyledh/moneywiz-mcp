@@ -300,6 +300,60 @@ def test_investment_trade_lifecycle(live):
         accounts.delete(account["id"])
 
 
+def test_commission_rebates_are_negative_commissions(live):
+    accounts, investments = live["accounts"], Investments(live["native"])
+    account = accounts.create(group_id=live["group"], name=SANDBOX + "REBATE", kind="investment", currency="USD",
+                              opening_balance="10000", opening_date="2026-11-01")
+    try:
+        # Brokers such as IBKR pay rebates; MoneyWiz nets a negative commission.
+        bought = investments.trade(account=account["id"], side="buy", symbol="MCPTESTR", shares="400", price="10",
+                                   date_="2026-11-10", commission="-1.96", description=SANDBOX + "rebate")
+        assert bought["transaction"]["amount"] == "-3998.04" and bought["transaction"]["fee"] == "-1.96"
+        assert bought["account_balance"] == "6001.96"
+        # The full precision of the broker's figure, and edits that leave the rebate alone.
+        edited = investments.update_trade(bought["transaction"]["id"], commission="-1.961623471")
+        assert edited["transaction"]["fee"] == "-1.961623471"
+        assert edited["transaction"]["amount"] == "-3998.038376529"
+        edited = investments.update_trade(bought["transaction"]["id"], description=SANDBOX + "rebate2")
+        assert edited["transaction"]["fee"] == "-1.961623471"
+        sold = investments.trade(account=account["id"], side="sell", symbol="MCPTESTR", shares="100", price="12",
+                                 date_="2026-11-12", commission="-0.5")
+        assert sold["transaction"]["amount"] == "1200.5"
+        for row in live["native"].query("Transaction", where=[["account.GID", "eq", s(account["id"])]],
+                                        fields=[])["items"]:
+            investments.delete_trade(row["gid"])
+        assert accounts.get(account["id"])["balance"] == "10000"
+    finally:
+        for row in live["native"].query("Transaction", where=[["account.GID", "eq", s(account["id"])]],
+                                        fields=[])["items"]:
+            live["transactions"].delete(row["gid"])
+        accounts.delete(account["id"])
+
+
+def test_refund_uses_the_expense_category_and_full_precision(live):
+    accounts, transactions, catalog = live["accounts"], live["transactions"], live["catalog"]
+    account = accounts.create(group_id=live["group"], name=SANDBOX + "REF2", kind="cash", currency="USD", opening_balance="100")
+    category = catalog.create_category(SANDBOX + "FEES", "expense")
+    try:
+        expense = transactions.create(account=account["id"], kind="expense", amount_="2.123456789", date_="2026-11-14",
+                                      description=SANDBOX + "fee", categories=category["id"])
+        assert expense["amount"] == "-2.123456789"
+        # As in MoneyWiz, a refund is filed under expense categories.
+        refund = transactions.create(account=account["id"], kind="refund", amount_="2.123456789", date_="2026-11-15",
+                                     description=SANDBOX + "cancel", refund_of=expense["id"], categories=category["id"])
+        assert refund["refund_of_ids"] == [expense["id"]]
+        assert [c["id"] for c in refund["categories"]] == [category["id"]]
+        assert refund["categories"][0]["amount"] == "2.123456789"
+        edited = transactions.update(refund["id"], amount="1.5", categories=[{"category": category["id"], "amount": "1.5"}])
+        assert edited["amount"] == "1.5" and [c["id"] for c in edited["categories"]] == [category["id"]]
+        transactions.delete(refund["id"])
+        transactions.delete(expense["id"])
+        assert accounts.get(account["id"])["balance"] == "100"
+    finally:
+        accounts.delete(account["id"])
+        catalog.delete("Category", category["id"])
+
+
 def test_manual_holding_and_price(live):
     accounts, investments, portfolio = live["accounts"], Investments(live["native"]), live["portfolio"]
     account = accounts.create(group_id=live["group"], name=SANDBOX + "BROKER2", kind="investment", currency="USD", opening_balance="100")

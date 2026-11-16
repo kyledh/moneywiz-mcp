@@ -466,7 +466,8 @@ def moneywiz_trade(
     account: AccountRef, side: Literal["buy", "sell"],
     symbol: Annotated[str, Field(description="Ticker as MoneyWiz knows it, e.g. AAPL")],
     shares: Amount, price: Annotated[str, Field(description="Price per share")], date: When,
-    commission: str = "0", description: str = "", memo: str = "",
+    commission: Annotated[str, Field(default="0", description="Commission; negative for a rebate")] = "0",
+    description: str = "", memo: str = "",
     holding_type: Annotated[str, Field(default="", description='e.g. "Stock" or "Option"')] = "",
 ) -> dict:
     """Buy or sell shares in an investment account. A buy creates the holding if needed."""
@@ -477,7 +478,8 @@ def moneywiz_trade(
 
 @mcp.tool(annotations=EDIT)
 def moneywiz_update_trade(transaction_id: str, shares: str | None = None, price: str | None = None,
-                          commission: str | None = None, date: When | None = None,
+                          commission: Annotated[str | None, Field(default=None, description=(
+                              "Commission; negative for a rebate"))] = None, date: When | None = None,
                           description: str | None = None, memo: str | None = None,
                           symbol: str | None = None) -> dict:
     """Change an investment buy or sell; MoneyWiz recalculates shares and cost basis."""

@@ -119,8 +119,11 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
 
 * **Amounts** are decimal strings (`"12.50"`). Pass positive amounts; the kind
   (`expense`, `income`, `transfer`, `refund`, buy/sell) decides the direction.
-  MoneyWiz stores doubles, so output is the shortest exact decimal of the
-  stored value (`-26.6`, not `-26.600000000000001`).
+  MoneyWiz stores doubles, which hold 15 significant digits: amounts up to that
+  precision (`"0.351623471"`) are stored and read back as written, and longer
+  ones are refused rather than rounded silently. A transaction's fields read
+  back at that precision (`-26.6`, not `-26.600000000000001`); balances and
+  totals are rounded to 8 decimals to drop the noise of summing doubles.
 * **Dates** accept `YYYY-MM-DD` (local noon, so the day never shifts) or a full
   ISO 8601 timestamp. Output is local time. List ranges are `[start, end)`.
 * **Accounts** by id or exact name; **categories** by id or full path
@@ -128,7 +131,8 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
 * **Category splits** are a list that must add up to the amount:
   `[{"category": "Food/Coffee", "amount": "10.00"}, {"category": "Tips", "amount": "2.50"}]`.
   Changing the amount of a single-category transaction moves the allocation
-  with it; a split transaction needs a new list.
+  with it; a split transaction needs a new list. Refunds take expense
+  categories, as in MoneyWiz: the money goes back to what was spent on.
 * **Foreign currency**: give `original_amount` + `original_currency` alongside
   the amount in the account's currency; the rate is derived, or pass
   `exchange_rate`.
@@ -137,7 +141,8 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
   "transfer between A and B succeeded" dialog is skipped for transfers made
   through the server; transfers entered in the app still show it.
 * **Trades** buy or sell by symbol; a first buy creates the holding, and
-  MoneyWiz recalculates shares, cost basis and the account's cash.
+  MoneyWiz recalculates shares, cost basis and the account's cash. A negative
+  commission is a rebate: a buy then costs `shares x price - rebate`.
 * Unknown payee and tag names are created, as in the app. Unknown categories
   are rejected.
 * Read balances from accounts. Never sum transaction rows: they include
