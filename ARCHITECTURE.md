@@ -12,25 +12,35 @@
    encoding and the agent compares it with the live method, then checks each
    argument's tag against the encoded parameter type. A changed signature fails
    loudly instead of pushing misaligned arguments onto the stack.
-3. **Validate everything before touching the app.** An uncaught Objective-C
-   exception inside MoneyWiz terminates it, and the injection layer cannot
-   catch one. So key paths are walked through the Core Data model, selectors
-   are checked with `respondsToSelector:`, references are resolved to real
-   objects, and amounts and dates are parsed before anything is called.
-4. **Never scan the heap.** `ObjC.choose` walks malloc zones; doing that on the
+3. **Validate what a call needs before touching the app.** An uncaught
+   Objective-C exception inside MoneyWiz terminates it, and the injection layer
+   cannot catch one. So key paths are walked through the Core Data model,
+   selectors are checked with `respondsToSelector:`, references are resolved to
+   real objects of the right kind, and amounts and dates are parsed before
+   anything is called.
+4. **Leave value rules to MoneyWiz.** The server adds no rules of its own on
+   top of what MoneyWiz accepts: no sign, zero, precision, split-total,
+   category-kind or duplicate-name checks. Where MoneyWiz has a rule, the
+   server asks MoneyWiz (`DataValidatorHelper` for account and category names,
+   `currenciesArray` for currencies). The few guards that remain prevent states
+   that would break the app or lose data: a category cycle, merging an object
+   into itself, a zero amount we would divide by, a sell of something not
+   held, a transfer to the same account, deleting an account without
+   confirming its transaction count (MoneyWiz asks for that too).
+5. **Never scan the heap.** `ObjC.choose` walks malloc zones; doing that on the
    main thread while other threads allocate wedged MoneyWiz during
    development. Use documented state instead: `+[MoneyWizManager isInitialized]`
    before `+sharedManager`, which would otherwise create and configure a
    manager when none exists.
-5. **One queue.** The user's managed object context is
+6. **One queue.** The user's managed object context is
    `NSMainQueueConcurrencyType`, so all work is scheduled on the main queue.
-6. **Call business methods, not setters.** `createWithdrawTransactionForAccount:…`
+7. **Call business methods, not setters.** `createWithdrawTransactionForAccount:…`
    recalculates balances, updates budget links, creates missing payees and
    saves. Writing `amount` directly would leave the ledger inconsistent.
-7. **Read back after writing.** Every write returns the object re-read from the
+8. **Read back after writing.** Every write returns the object re-read from the
    live graph, so the caller sees what MoneyWiz stored: the sign it chose, the
    allocation it adjusted, the id it assigned.
-8. **Refuse to write while the app has unsaved changes.** A business method
+9. **Refuse to write while the app has unsaved changes.** A business method
    saves the whole context, so it would commit whatever else is pending.
    Inserted or deleted objects, or updated objects with real `changedValues`,
    count; MoneyWiz touches investment holdings without changing values at
@@ -40,12 +50,12 @@
    overview and deletes it about a second later. The agent refuses before
    calling anything, with a named error, and `native.py` waits up to 5 s for
    the context to clear; an editor left open is still reported.
-9. **Silence only the dialogs our own calls raise.** A call may name an app
+10. **Silence only the dialogs our own calls raise.** A call may name an app
    observer that does nothing but present UI (the "transfer succeeded" alert).
    The agent replaces that method once with a pass-through and skips it only
    while that call runs on the main queue. The app's own calls are untouched,
    and Frida restores the method when the agent unloads.
-10. **Ship only what works.** A business call that cannot be completed reliably
+11. **Ship only what works.** A business call that cannot be completed reliably
    (for example share exchanges, see STATUS.md) is left out rather than exposed
    with caveats or kept as unused machinery.
 

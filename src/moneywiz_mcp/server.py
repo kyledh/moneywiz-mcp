@@ -363,7 +363,8 @@ def moneywiz_delete_catalog_object(
     object_type: Literal["category", "payee", "tag"],
     object_id: Annotated[str, Field(description="Id, or a category path")],
 ) -> dict:
-    """Delete an unused category, payee or tag. In-use objects must be merged instead."""
+    """Delete a category (with its subcategories), payee or tag. Transactions that used it stay and lose
+    the link; the result lists what referenced it. Merge instead to move those references."""
     entity = {"category": "Category", "payee": "Payee", "tag": "Tag"}[object_type]
     if object_type == "category":
         object_id = catalog.resolve_category(object_id)["id"]
@@ -512,7 +513,7 @@ def moneywiz_create_holding(
 
 @mcp.tool(annotations=DESTRUCTIVE)
 def moneywiz_delete_holding(holding_id: str, delete_trades: bool = False) -> dict:
-    """Delete a holding. Its trades must be gone, or pass delete_trades."""
+    """Delete a holding. MoneyWiz keeps its trades unless delete_trades is set."""
     return investments.delete_holding(holding_id, delete_trades=delete_trades)
 
 

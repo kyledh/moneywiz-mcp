@@ -13,7 +13,7 @@ starting values (`tests/test_live.py`).
 | Account groups | yes | create, update (incl. membership), delete, reorder | yes |
 | Transactions | yes | expense, income, transfer, refund: create, update, delete | single and split categories, foreign currency, fees, cheque numbers, tags, both transfer legs, cross-currency transfers, refund links |
 | Transaction state | yes | cleared/pending, reconciled, void | yes |
-| Categories | yes | create, rename, re-parent, reorder, merge, delete | yes, including the in-use delete guard |
+| Categories | yes | create, rename, re-parent, reorder, merge, delete | yes, including deleting one still in use (MoneyWiz unlinks its transactions) |
 | Payees, tags | yes | create, rename, merge, delete | yes |
 | Currencies | yes | default currency, manual rates, display list | manual rate set/clear; net worth and conversions computed by MoneyWiz |
 | Investments | holdings, shares, price, cost basis | buy, sell, edit trade, delete trade, create/delete holding, manual price, share count, cost basis | buy → second buy → edit → sell → delete, with shares, cost basis and cash checked at each step |

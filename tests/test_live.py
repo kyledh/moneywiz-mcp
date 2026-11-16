@@ -196,8 +196,6 @@ def test_catalog_merge_moves_references(live):
         created = transactions.create(account=account["id"], kind="expense", amount_="1", date_="2026-11-15",
                                       description=SANDBOX + "merge", payee=drop["name"])
         assert catalog.usage("Payee", drop["id"])["transactions"] == 1
-        with pytest.raises(MoneyWizError):
-            catalog.delete("Payee", drop["id"])
         catalog.merge("Payee", [drop["id"]], keep["id"])
         assert transactions.get(created["id"])["payee_id"] == keep["id"]
         assert live["native"].get("Payee", drop["id"]) is None
@@ -207,20 +205,52 @@ def test_catalog_merge_moves_references(live):
         accounts.delete(account["id"])
 
 
-def test_rejects_bad_input_before_touching_the_app(live):
+def test_deleting_a_used_category_payee_or_tag_unlinks_it(live):
+    # MoneyWiz's own rule: the transaction stays, without the deleted link, and
+    # a category takes its subcategories with it.
+    accounts, transactions, catalog = live["accounts"], live["transactions"], live["catalog"]
+    account = accounts.create(group_id=live["group"], name=SANDBOX + "UNLINK", kind="cash", currency="CNY", opening_balance="10")
+    parent = catalog.create_category(SANDBOX + "PARENT", "expense")
+    child = catalog.create_category(SANDBOX + "CHILD", "expense", parent_id=parent["id"])
+    try:
+        used = transactions.create(account=account["id"], kind="expense", amount_="4", date_="2026-11-15",
+                                   description=SANDBOX + "unlink", categories=child["id"],
+                                   payee=SANDBOX + "PAYEE", tags=[SANDBOX + "TAG"])
+        payee = next(p for p in catalog.payees(SANDBOX) if p["name"] == SANDBOX + "PAYEE")
+        tag = next(x for x in catalog.tags() if x["name"] == SANDBOX + "TAG")
+        assert catalog.delete("Category", parent["id"])["was_used_by"] == {"childCategories": 1}
+        assert catalog.delete("Payee", payee["id"])["was_used_by"] == {"transactions": 1}
+        assert catalog.delete("Tag", tag["id"])["was_used_by"] == {"transactions": 1}
+        assert live["native"].get("Category", child["id"]) is None
+        after = transactions.get(used["id"])
+        assert after["amount"] == "-4" and not after.get("categories") and not after.get("payee") and not after.get("tags")
+        assert accounts.get(account["id"])["balance"] == "6"
+        transactions.delete(used["id"])
+    finally:
+        accounts.delete(account["id"])
+
+
+def test_rejects_input_it_cannot_turn_into_a_call(live):
+    # Only what the server needs to build a valid call is checked here; value
+    # rules (sign, zero, precision, names) are MoneyWiz's own.
     accounts, transactions, native = live["accounts"], live["transactions"], live["native"]
-    account = accounts.list()[0]
-    for bad in (
-        dict(account=account["id"], kind="expense", amount_="abc", date_="2026-11-15"),
-        dict(account=account["id"], kind="expense", amount_="1", date_="15/11/2026"),
-        dict(account=account["id"], kind="expense", amount_="0", date_="2026-11-15"),
-        dict(account="no-such-account", kind="expense", amount_="1", date_="2026-11-15"),
-        dict(account=account["id"], kind="transfer", amount_="1", date_="2026-11-15"),
-        dict(account=account["id"], kind="refund", amount_="1", date_="2026-11-15"),
-    ):
-        with pytest.raises(MoneyWizError):
-            transactions.create(**bad)
-    assert native.status()["context"]["pending"] == 0
+    account = accounts.create(group_id=live["group"], name=SANDBOX + "BAD", kind="cash", currency="CNY")
+    try:
+        for bad in (
+            dict(account=account["id"], kind="expense", amount_="abc", date_="2026-11-15"),
+            dict(account=account["id"], kind="expense", amount_="NaN", date_="2026-11-15"),
+            dict(account=account["id"], kind="expense", amount_="1", date_="15/11/2026"),
+            dict(account="no-such-account", kind="expense", amount_="1", date_="2026-11-15"),
+            dict(account=account["id"], kind="expense", amount_="1", date_="2026-11-15", categories="no/such/category"),
+            dict(account=account["id"], kind="transfer", amount_="1", date_="2026-11-15"),
+            dict(account=account["id"], kind="refund", amount_="1", date_="2026-11-15"),
+        ):
+            with pytest.raises(MoneyWizError):
+                transactions.create(**bad)
+        assert native.count("Transaction", [["account.GID", "eq", s(account["id"])]]) == 0
+        assert native.status()["context"]["pending"] == 0
+    finally:
+        accounts.delete(account["id"])
 
 
 # Archiving is not exercised here: MoneyWiz moves an archived account to "no
@@ -284,9 +314,6 @@ def test_investment_trade_lifecycle(live):
         assert sold["transaction"]["kind"] == "investment_sell"
         assert sold["transaction"]["amount"] == "159.5"
         assert sold["holding"]["shares"] == "13"
-
-        with pytest.raises(MoneyWizError):
-            investments.delete_holding(sold["holding"]["id"])  # still has trades
 
         for row in live["native"].query("Transaction", where=[["account.GID", "eq", s(account["id"])]],
                                         fields=[])["items"]:

@@ -1,7 +1,7 @@
 """D04 currencies, exchange rates and ledger-wide settings."""
 from __future__ import annotations
 
-from .native import Native, MoneyWizError, s, n, nb, ref, arr
+from .native import Native, MoneyWizError, s, n, nb, ref, arr, currency_code
 from .values import amount, money, clean
 
 
@@ -41,13 +41,7 @@ class Settings:
         return result
 
     def _check(self, currency: str) -> str:
-        if not (isinstance(currency, str) and len(currency) == 3 and currency.isalpha()):
-            raise MoneyWizError("currency must be a 3-letter code such as USD")
-        currency = currency.upper()
-        known = self.n.invoke("manager", "currenciesArray", [], save=False)["value"] or []
-        if isinstance(known, list) and known and currency not in known:
-            raise MoneyWizError(f"MoneyWiz does not know the currency {currency}")
-        return currency
+        return currency_code(self.n, currency)
 
     def manual_rate(self, from_currency: str, to_currency: str) -> dict:
         source, target = self._check(from_currency), self._check(to_currency)
@@ -57,8 +51,6 @@ class Settings:
 
     def set_manual_rate(self, from_currency: str, to_currency: str, rate) -> dict:
         source, target = self._check(from_currency), self._check(to_currency)
-        if source == target:
-            raise MoneyWizError("A manual rate needs two different currencies")
         value = amount(rate, field="rate")
         self.n.invoke("manager", "setManualRate:fromCurrency:toCurrency:",
                       [n(float(value)), s(source), s(target)])

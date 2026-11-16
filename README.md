@@ -117,22 +117,23 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
 
 ### Conventions
 
-* **Amounts** are decimal strings (`"12.50"`). Pass positive amounts; the kind
-  (`expense`, `income`, `transfer`, `refund`, buy/sell) decides the direction.
-  MoneyWiz stores doubles, which hold 15 significant digits: amounts up to that
-  precision (`"0.351623471"`) are stored and read back as written, and longer
-  ones are refused rather than rounded silently. A transaction's fields read
-  back at that precision (`-26.6`, not `-26.600000000000001`); balances and
-  totals are rounded to 8 decimals to drop the noise of summing doubles.
+* **Amounts** are decimal strings (`"12.50"`). The kind (`expense`, `income`,
+  `transfer`, `refund`, buy/sell) decides the direction, so pass positive
+  amounts: MoneyWiz stores an expense of `5` as `-5`, and a negative amount
+  reverses that, exactly as MoneyWiz would. Values are handed to MoneyWiz as
+  given (it stores doubles, 15 significant digits); a transaction's fields read
+  back at that precision (`-26.6`, not `-26.600000000000001`), while balances
+  and totals are rounded to 8 decimals to drop the noise of summing doubles.
 * **Dates** accept `YYYY-MM-DD` (local noon, so the day never shifts) or a full
   ISO 8601 timestamp. Output is local time. List ranges are `[start, end)`.
 * **Accounts** by id or exact name; **categories** by id or full path
   (`"Food/Coffee"`).
-* **Category splits** are a list that must add up to the amount:
+* **Category splits** are a list of categories and amounts:
   `[{"category": "Food/Coffee", "amount": "10.00"}, {"category": "Tips", "amount": "2.50"}]`.
-  Changing the amount of a single-category transaction moves the allocation
-  with it; a split transaction needs a new list. Refunds take expense
-  categories, as in MoneyWiz: the money goes back to what was spent on.
+  MoneyWiz does not require them to add up to the amount, so check the totals
+  you send. Changing the amount of a single-category transaction moves the
+  allocation with it, as in the app; a split keeps its amounts unless you pass
+  a new list. Refunds normally use the expense's category, as in MoneyWiz.
 * **Foreign currency**: give `original_amount` + `original_currency` alongside
   the amount in the account's currency; the rate is derived, or pass
   `exchange_rate`.
@@ -143,15 +144,19 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
 * **Trades** buy or sell by symbol; a first buy creates the holding, and
   MoneyWiz recalculates shares, cost basis and the account's cash. A negative
   commission is a rebate: a buy then costs `shares x price - rebate`.
-* Unknown payee and tag names are created, as in the app. Unknown categories
-  are rejected.
+* Unknown payee and tag names are created, as in the app (an existing name is
+  reused). Unknown categories are rejected.
 * Read balances from accounts. Never sum transaction rows: they include
   pending and void entries and both legs of each transfer.
 
 ## Safety
 
-* Every input is validated before MoneyWiz is touched, because an exception
-  raised inside the app would terminate it.
+* The server checks only what it needs to build a valid call (a parseable
+  number or date, an existing account or category, the right object types),
+  because an exception raised inside the app would terminate it. Value rules
+  are MoneyWiz's own: account names go through MoneyWiz's name validator and
+  currencies through its currency list; sign, zero, precision, split totals
+  and duplicate payee or tag names are left to MoneyWiz, as in its editors.
 * Writes are silent: no dialogs, notifications, sounds, progress overlays or
   window activation (traced across every write tool on build 466). The one
   dialog MoneyWiz raises in reaction, "transfer succeeded", is skipped.
@@ -160,8 +165,10 @@ What is and is not covered yet is listed in [STATUS.md](STATUS.md).
   never committed for you.
 * Deleting an account deletes its transactions, so the tool refuses unless you
   pass the exact transaction count it reports. Archiving is usually better.
-* Categories, payees, tags and holdings that are still referenced cannot be
-  deleted; merge them instead.
+* Deleting a category also deletes its subcategories; transactions that used
+  it, or a deleted payee or tag, stay and lose that link. The result lists what
+  referenced it. Deleting a holding keeps its trades unless `delete_trades` is
+  set. Merging is usually the better choice.
 * Each call saves on its own, like an edit in the app; several calls are not
   one transaction.
 * Saved locally is not synced: MoneyWiz uploads to iCloud on its own schedule.

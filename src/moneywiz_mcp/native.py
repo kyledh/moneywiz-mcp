@@ -204,6 +204,17 @@ def date(value: datetime) -> dict:
     return {"date": value.timestamp()}
 
 
+def currency_code(native: "Native", code) -> str:
+    """Upper-case a currency code and check it against MoneyWiz's own list."""
+    if not isinstance(code, str):
+        raise MoneyWizError("currency: a code such as USD is required")
+    code = code.strip().upper()
+    known = native.invoke("manager", "currenciesArray", [], save=False)["value"] or []
+    if isinstance(known, list) and known and code not in known:
+        raise MoneyWizError(f"MoneyWiz does not know the currency {code}")
+    return code
+
+
 def opt_s(value: str | None) -> dict:
     return NIL if value is None else s(value)
 

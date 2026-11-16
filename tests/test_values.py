@@ -6,24 +6,20 @@ from moneywiz_mcp.native import MoneyWizError, ni, dec, date as date_arg
 from moneywiz_mcp.values import amount, money, parse_bound, parse_when, show_date, stored
 
 
-def test_amount_accepts_decimal_strings():
+def test_amount_accepts_any_finite_number():
+    # Sign, size and precision are MoneyWiz's to judge; parsing only needs a number.
     assert str(amount("12.50")) == "12.50"
     assert str(amount(12.5)) == "12.5"
-    assert str(amount("0", allow_zero=True)) == "0"
-    assert str(amount("-3", allow_negative=True)) == "-3"
+    assert str(amount("0")) == "0"
+    assert str(amount("-3")) == "-3"
+    assert str(amount("1e3")) == "1E+3"
+    assert str(amount("1.123456789")) == "1.123456789"
 
 
-@pytest.mark.parametrize("bad", ["abc", "", None, "1,5", "1e3", "--1", "1234567890.123456", "0.1234567890123456"])
-def test_amount_rejects_junk(bad):
+@pytest.mark.parametrize("bad", ["abc", "", None, "1,5", "--1", "NaN", "Infinity"])
+def test_amount_rejects_what_is_not_a_finite_number(bad):
     with pytest.raises(MoneyWizError):
         amount(bad)
-
-
-def test_amount_rejects_zero_and_negative_by_default():
-    with pytest.raises(MoneyWizError):
-        amount("0")
-    with pytest.raises(MoneyWizError):
-        amount("-1")
 
 
 def test_money_shortens_stored_doubles():
@@ -72,13 +68,6 @@ def test_typed_argument_helpers():
     assert date_arg(datetime(2026, 1, 1, tzinfo=timezone.utc)) == {"date": 1767225600.0}
     with pytest.raises(MoneyWizError):
         date_arg(datetime(2026, 1, 1))
-
-
-def test_amount_keeps_every_digit_a_double_can_hold():
-    assert str(amount("1.123456789")) == "1.123456789"
-    assert str(amount("-0.351623471", allow_negative=True)) == "-0.351623471"
-    with pytest.raises(MoneyWizError, match="16 significant digits"):
-        amount("1234567890.123456")
 
 
 def test_stored_fields_read_back_as_written():

@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from .accounts import Accounts
 from .catalog import Catalog
-from .native import Native, MoneyWizError, s, n, ni, nb, b, ref, arr, date, opt_s, NIL
+from .native import Native, MoneyWizError, s, n, ni, nb, b, ref, arr, date, opt_s, NIL, currency_code
 from .values import amount, parse_when, parse_bound, show_date, clean, stored
 
 # Transaction.status: MoneyWiz marks a record pending or cleared; "reconciled"
@@ -71,11 +71,11 @@ DELETE = "deleteTransactionWithBalanceRecalculation:notifyAccountsBalanceChange:
 TRANSFER_NOTICE = (("iphoneMoneyWizViewController", "onTransactionCreated:"),)
 
 
-def _rate(value, field="exchange_rate") -> Decimal:
-    rate = amount(value, field=field)
-    if rate <= 0:
-        raise MoneyWizError(f"{field} must be positive")
-    return rate
+def _ratio(numerator: Decimal, denominator: Decimal, what: str) -> Decimal:
+    # We derive a rate from two amounts; with a zero amount there is none.
+    if denominator == 0:
+        raise MoneyWizError(f"Cannot derive {what} from a zero amount; give the rate explicitly")
+    return numerator / denominator
 
 
 def view(row: dict) -> dict:
@@ -180,9 +180,9 @@ class Transactions:
             else:
                 raise MoneyWizError("status must be pending, cleared or reconciled")
         if min_amount is not None:
-            where.append(["amount", "ge", n(float(amount(min_amount, field="min_amount", allow_zero=True, allow_negative=True)))])
+            where.append(["amount", "ge", n(float(amount(min_amount, field="min_amount")))])
         if max_amount is not None:
-            where.append(["amount", "le", n(float(amount(max_amount, field="max_amount", allow_zero=True, allow_negative=True)))])
+            where.append(["amount", "le", n(float(amount(max_amount, field="max_amount")))])
         limit = max(1, min(int(limit), 500))
         result = self.n.query(entity, where=where, fields=FIELDS, sort=[["date", False]],
                               limit=limit, offset=offset, count=True)
@@ -205,33 +205,24 @@ class Transactions:
 
     # ------------------------------------------------------------ input helpers
 
-    def _splits(self, categories, total: Decimal, kind: str):
+    def _splits(self, categories, total: Decimal):
         """Normalize a category split list into (category refs, amounts)."""
         if not categories:
             return NIL, NIL, []
         if isinstance(categories, (str, dict)):
             categories = [categories]
-        # A refund returns money to what was spent on, so MoneyWiz files it
-        # under expense categories, like the expense it refunds.
-        wanted = "income" if kind == "income" else "expense"
         resolved, amounts = [], []
         for entry in categories:
             if isinstance(entry, str):
                 entry = {"category": entry}
             if not isinstance(entry, dict) or "category" not in entry:
                 raise MoneyWizError('each category entry needs {"category": "name or id", "amount": "12.00"}')
-            found = self.catalog.resolve_category(entry["category"])
-            if found["type"] != wanted:
-                raise MoneyWizError(f"Category {found['path']!r} is an {found['type']} category, "
-                                    f"but this is a(n) {kind} transaction")
-            resolved.append(found)
+            resolved.append(self.catalog.resolve_category(entry["category"]))
             amounts.append(amount(entry["amount"], field="category amount") if entry.get("amount") is not None else None)
         if len(resolved) == 1 and amounts[0] is None:
             amounts[0] = total
         if any(value is None for value in amounts):
             raise MoneyWizError("Give an amount for every category when splitting a transaction")
-        if sum(amounts) != total:
-            raise MoneyWizError(f"Category amounts add up to {sum(amounts)}, but the transaction amount is {total}")
         return (arr(ref("Category", c["id"]) for c in resolved), arr(n(float(v)) for v in amounts),
                 [{"id": c["id"], "name": c["path"], "amount": str(v)} for c, v in zip(resolved, amounts, strict=True)])
 
@@ -259,11 +250,12 @@ class Transactions:
             return s(account["currency"]), n(float(value)), n(1.0), None
         if original_currency is None or original_amount is None:
             raise MoneyWizError("Give original_currency together with original_amount for a foreign-currency entry")
-        currency = str(original_currency).upper()
+        currency = currency_code(self.n, original_currency)
         if currency == account["currency"]:
             return s(account["currency"]), n(float(value)), n(1.0), None
         foreign = amount(original_amount, field="original_amount")
-        rate = _rate(exchange_rate) if exchange_rate is not None else (value / foreign)
+        rate = amount(exchange_rate, field="exchange_rate") if exchange_rate is not None \
+            else _ratio(value, foreign, "an exchange rate")
         return (s(currency), n(float(foreign)), n(float(rate)),
                 {"currency": currency, "amount": str(foreign), "exchange_rate": str(rate)})
 
@@ -287,19 +279,16 @@ class Transactions:
         if kind not in ("expense", "income", "transfer", "refund"):
             raise MoneyWizError("kind must be expense, income, transfer or refund")
         source = self.accounts.resolve(account)
-        if source["archived"]:
-            raise MoneyWizError(f"Account {source['name']!r} is archived; unarchive it before adding transactions")
         value = amount(amount_, field="amount")
         when = parse_when(date_)
-        fee_value = amount(fee, field="fee", allow_zero=True) if fee is not None else Decimal(0)
+        fee_value = amount(fee, field="fee") if fee is not None else Decimal(0)
         if kind == "transfer":
             return self._create_transfer(source, value, when, description, memo, payee, tags, fee_value,
                                          cheque_number, transfer_to, transfer_amount, transfer_exchange_rate,
                                          categories, status,
                                          parse_when(receive_date, field="receive_date") if receive_date else None)
         currency, original, rate, original_view = self._fx(source, value, original_amount, original_currency, exchange_rate)
-        split_kind = kind
-        cats, monies, _ = self._splits(categories, value, split_kind)
+        cats, monies, _ = self._splits(categories, value)
         tail = [cats, monies, opt_s(cheque_number), NIL, s(memo or ""), self._tags(tags), NIL, NIL, NIL]
         if kind == "expense":
             args = [ref("Account", source["id"]), NIL, s(description), self._payee(payee), currency, original, rate,
@@ -329,22 +318,18 @@ class Transactions:
         target = self.accounts.resolve(transfer_to)
         if target["id"] == source["id"]:
             raise MoneyWizError("Transfer source and destination must differ")
-        if target["archived"]:
-            raise MoneyWizError(f"Account {target['name']!r} is archived")
-        if target["currency"] == source["currency"]:
-            received, rate = value, Decimal(1)
-            if transfer_amount is not None and amount(transfer_amount, field="transfer_amount") != value:
-                raise MoneyWizError("Both accounts use the same currency, so transfer_amount must equal amount")
-        elif transfer_amount is not None:
+        if transfer_amount is not None:
             received = amount(transfer_amount, field="transfer_amount")
-            rate = received / value
+            rate = Decimal(1) if received == value else _ratio(received, value, "the transfer rate")
         elif transfer_exchange_rate is not None:
-            rate = _rate(transfer_exchange_rate, field="transfer_exchange_rate")
-            received = (value * rate).quantize(Decimal("0.01"))
+            rate = amount(transfer_exchange_rate, field="transfer_exchange_rate")
+            received = value * rate
+        elif target["currency"] == source["currency"]:
+            received, rate = value, Decimal(1)
         else:
             raise MoneyWizError(f"{source['currency']}→{target['currency']} transfer needs transfer_amount "
                                 "(the amount received) or transfer_exchange_rate")
-        cats, monies, _ = self._splits(categories, value, "expense")
+        cats, monies, _ = self._splits(categories, value)
         args = [ref("Account", source["id"]), ref("Account", target["id"]), s(description), s(memo or ""),
                 n(float(value)), s(source["currency"]), n(float(rate)), n(float(received)), s(target["currency"]),
                 n(float(fee_value)), s(source["currency"]), date(when), date(receive or when), cats, monies,
@@ -384,7 +369,7 @@ class Transactions:
         when = parse_when(changes["date"]) if changes.get("date") else parse_when(current["date"])
         description = changes.get("description", current.get("description") or "")
         memo = changes.get("memo", current.get("memo") or "")
-        fee_value = amount(changes["fee"], field="fee", allow_zero=True) if changes.get("fee") is not None else \
+        fee_value = amount(changes["fee"], field="fee") if changes.get("fee") is not None else \
             Decimal(current.get("fee") or 0)
         cheque = changes.get("cheque_number", current.get("cheque_number"))
         payee = changes.get("payee", current.get("payee"))
@@ -394,15 +379,10 @@ class Transactions:
         else:
             categories = [{"category": c["id"], "amount": str(abs(Decimal(c["amount"])))}
                           for c in current.get("categories") or []]
-            if categories and value != abs(Decimal(current["amount"])):
-                # The split has to keep matching the total: one category follows
-                # the new amount, several need the caller to restate them.
-                if len(categories) == 1:
-                    categories[0]["amount"] = str(value)
-                else:
-                    raise MoneyWizError(
-                        f"This transaction is split across {len(categories)} categories, so changing the amount "
-                        "needs a new categories list that adds up to it")
+            # As in the app, a single category follows the new amount; a split
+            # keeps its amounts unless a new list is given.
+            if len(categories) == 1 and value != abs(Decimal(current["amount"])):
+                categories[0]["amount"] = str(value)
 
         if kind == "transfer_out":
             target = self.accounts.resolve(changes["transfer_to"]) if changes.get("transfer_to") else \
@@ -414,15 +394,15 @@ class Transactions:
             if changes.get("transfer_amount") is not None:
                 received = amount(changes["transfer_amount"], field="transfer_amount")
             elif changes.get("transfer_exchange_rate") is not None:
-                received = (value * _rate(changes["transfer_exchange_rate"], field="transfer_exchange_rate")).quantize(Decimal("0.01"))
+                received = value * amount(changes["transfer_exchange_rate"], field="transfer_exchange_rate")
             elif target["currency"] == account["currency"]:
                 received = value
             elif "amount" in changes:
                 raise MoneyWizError("Changing a cross-currency transfer amount needs transfer_amount or transfer_exchange_rate")
             else:
                 received = received_now
-            rate = Decimal(1) if received == value else received / value
-            cats, monies, _ = self._splits(categories, value, "expense")
+            rate = Decimal(1) if received == value else _ratio(received, value, "the transfer rate")
+            cats, monies, _ = self._splits(categories, value)
             args = [ref("Transaction", transaction_id), ref("Account", account["id"]), ref("Account", target["id"]),
                     s(description), s(memo), n(float(value)), s(account["currency"]), n(float(rate)),
                     n(float(received)), s(target["currency"]), n(float(fee_value)), s(account["currency"]),
@@ -443,7 +423,7 @@ class Transactions:
         else:
             original_amount = original_currency = exchange_rate = None
         currency, original, rate, _ = self._fx(fx_source, value, original_amount, original_currency, exchange_rate)
-        cats, monies, _ = self._splits(categories, value, kind)
+        cats, monies, _ = self._splits(categories, value)
         tail = [cats, monies, opt_s(cheque), NIL, s(memo), self._tags(tags), NIL, NIL, NIL]
         if kind == "expense":
             args = [ref("Transaction", transaction_id), ref("Account", account["id"]), s(description),

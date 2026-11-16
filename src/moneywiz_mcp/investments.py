@@ -31,8 +31,8 @@ TRADE_KINDS = {"investment_buy": EDIT_BUY, "investment_sell": EDIT_SELL}
 
 
 def _symbol(value: str) -> str:
-    if not isinstance(value, str) or not value.strip() or value != value.strip() or len(value) > 64:
-        raise MoneyWizError("symbol: a ticker such as AAPL is required")
+    if not isinstance(value, str):
+        raise MoneyWizError("symbol: text required, such as AAPL")
     return value
 
 
@@ -48,8 +48,6 @@ class Investments:
         if resolved["kind"] not in INVESTMENT_KINDS:
             raise MoneyWizError(f"{resolved['name']!r} is a {resolved['kind']} account; "
                                 "trades need an investment or forex account")
-        if resolved["archived"]:
-            raise MoneyWizError(f"Account {resolved['name']!r} is archived")
         return resolved
 
     def _holding_of(self, account_id: str, symbol: str) -> dict | None:
@@ -65,10 +63,8 @@ class Investments:
                        currency_position: bool = False) -> dict:
         resolved = self._account(account)
         _symbol(symbol)
-        if self._holding_of(resolved["id"], symbol):
-            raise MoneyWizError(f"{resolved['name']!r} already holds {symbol}")
-        opening = amount(shares, field="shares", allow_zero=True, allow_negative=True)
-        value = amount(price, field="price", allow_zero=True)
+        opening = amount(shares, field="shares")
+        value = amount(price, field="price")
         result = self.n.invoke("manager", CREATE_HOLDING,
                                [ref("Account", resolved["id"]), i(CURRENCY if currency_position else SECURITY),
                                 NIL, s(""), s(holding_type or ""), s(name or symbol), s(cusip or ""),
@@ -80,9 +76,6 @@ class Investments:
     def delete_holding(self, holding_id: str, *, delete_trades: bool = False) -> dict:
         holding = self.portfolio.holding(holding_id)
         trades = self.n.count("Transaction", [["investmentHolding.GID", "eq", s(holding_id)]])
-        if trades and not delete_trades:
-            raise MoneyWizError(f"{holding['symbol']} still has {trades} trades; "
-                                "pass delete_trades=true to remove them with it")
         result = self.n.invoke("manager", "deleteInvestmentHolding:deleteTrades:",
                                [ref("InvestmentHolding", holding_id), b(delete_trades)])
         if result["value"] is False:
@@ -101,9 +94,9 @@ class Investments:
         resolved = self._account(account)
         _symbol(symbol)
         quantity = amount(shares, field="shares")
-        unit = amount(price, field="price", allow_zero=True)
+        unit = amount(price, field="price")
         # A negative commission is a rebate; MoneyWiz stores and nets it as given.
-        fee = amount(commission, field="commission", allow_zero=True, allow_negative=True)
+        fee = amount(commission, field="commission")
         existing = self._holding_of(resolved["id"], symbol)
         if side == "sell" and existing is None:
             raise MoneyWizError(f"{resolved['name']!r} holds no {symbol}; buy it or add the holding first")
@@ -144,9 +137,8 @@ class Investments:
         account = self.accounts.resolve(current["account_id"])
         symbol = _symbol(changes.get("symbol", current.get("symbol")))
         quantity = amount(changes.get("shares", current.get("shares")), field="shares")
-        unit = amount(changes.get("price", current.get("price_per_share")), field="price", allow_zero=True)
-        fee = amount(changes.get("commission", current.get("fee") or 0), field="commission", allow_zero=True,
-                     allow_negative=True)
+        unit = amount(changes.get("price", current.get("price_per_share")), field="price")
+        fee = amount(changes.get("commission", current.get("fee") or 0), field="commission")
         when = parse_when(changes["date"]) if changes.get("date") else parse_when(current["date"])
         holding = self._holding_of(account["id"], symbol) or {}
         self.n.invoke("manager", selector,
