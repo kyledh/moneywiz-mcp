@@ -1,9 +1,12 @@
 """The row -> tool-output mapping, on rows shaped exactly like the agent's."""
+from datetime import datetime, timezone
+
 from moneywiz_mcp.accounts import view as account_view
+from moneywiz_mcp.budgets import decode_tags, view as budget_view
 from moneywiz_mcp.native import SIGNATURES, decode
-from moneywiz_mcp.portfolio import period
 from moneywiz_mcp.scheduled import view as scheduled_view
 from moneywiz_mcp.transactions import view as transaction_view
+from moneywiz_mcp.values import local_tz
 
 
 def test_account_view_maps_balance_and_kind():
@@ -78,11 +81,24 @@ def test_decode_unwraps_agent_tags():
     assert decode([{"a": {"$dec": "1"}}]) == [{"a": "1"}]
 
 
-def test_repeat_period_only_names_verified_units():
-    assert period(1, 8) == "every month"
-    assert period(2, 4) == "every 2 years"
-    assert period(1, 2) == "1 x unit 2"  # not verified against the app: reported raw
-    assert period(0, 8) is None
+def test_budget_view_and_tag_filter():
+    row = {"$ref": "Budget", "gid": "B1", "name": "Food", "type": 0, "currencyName": "CNY", "isRepeatable": 1,
+           "duration": 1, "durationUnits": 8, "startDate": "2026-10-31T16:00:00+00:00", "endDate": None,
+           "isPeriodMoneyTransferEnabled": 1, "carriedBalance": 0, "openingBalance": 100.0, "groupID": 7000000000000000001,
+           "iconFileName": "mw2_category_icon_260", "tagsPredicateToMonitor": "%E6%97%85%E8%A1%8C OR trip",
+           "accountsLinksToMonitor.account.GID": ["A1"], "accountsLinksToMonitor.account.name": ["Cash"],
+           "categoriesAssigmentsToMonitor.category.GID": ["C1"], "categoriesAssigmentsToMonitor.category.name": ["Food"]}
+    view = budget_view(row, {"number": 0, "budgeted": "100", "spent": "120", "remaining": "-20"})
+    assert view["kind"] == "expense" and view["repeat"] == {"every": 1, "unit": "month"} and view["rollover"] is True
+    assert view["tags"] == ["旅行", "trip"] and view["tags_match"] == "any" and "tag_filter" not in view
+    assert view["current_period"]["remaining"] == "-20" and "amount" not in view
+    # Stored as local midnight of the day after the last day (whatever the machine's zone is).
+    next_day = datetime(2026, 12, 1, tzinfo=local_tz()).astimezone(timezone.utc).isoformat()
+    once = budget_view(row | {"isRepeatable": 0, "type": 1, "endDate": next_day, "tagsPredicateToMonitor": None})
+    assert once["kind"] == "income" and once["amount"] == "100" and "repeat" not in once and "rollover" not in once
+    assert once["end_date"].startswith("2026-11-30T23:59:59")
+    assert decode_tags("a AND b") == (["a", "b"], "all")
+    assert decode_tags("a OR b AND c") == (None, None)
 
 
 def test_scheduled_view_reads_the_raw_row():
@@ -114,9 +130,9 @@ def test_scheduled_view_reads_the_raw_row():
 def test_shipped_signatures_cover_the_selectors_the_domains_call():
     import inspect
 
-    from moneywiz_mcp import accounts, catalog, investments, portfolio, scheduled, settings, transactions
+    from moneywiz_mcp import accounts, budgets, catalog, investments, portfolio, scheduled, settings, transactions
 
-    for module in (accounts, catalog, investments, portfolio, scheduled, settings, transactions):
+    for module in (accounts, budgets, catalog, investments, portfolio, scheduled, settings, transactions):
         source = inspect.getsource(module)
         for name in dir(module):
             if name.startswith("_"):

@@ -17,6 +17,7 @@ from .accounts import Accounts, KINDS
 from .investments import Investments
 from .catalog import Catalog
 from .native import Native, MoneyWizError
+from .budgets import Budgets
 from .portfolio import Portfolio
 from .scheduled import Scheduled
 from .settings import Settings
@@ -48,6 +49,7 @@ settings = Settings(native)
 portfolio = Portfolio(native)
 investments = Investments(native)
 scheduled = Scheduled(native)
+budgets = Budgets(native)
 
 AccountRef = Annotated[str, Field(description="Account id, or its exact name")]
 Amount = Annotated[str, Field(description='Positive decimal string, e.g. "12.50"')]
@@ -75,7 +77,7 @@ def moneywiz_status() -> dict:
         "archived_accounts": len(accounts.list(include_archived=True)) - len(accounts.list()),
         "transactions": native.count("Transaction"),
         "categories": len(catalog.categories()), "payees": len(catalog.payees()), "tags": len(catalog.tags()),
-        "budgets": len(portfolio.budgets()), "scheduled": native.count("ScheduledTransactionHandler"),
+        "budgets": native.count("Budget"), "scheduled": native.count("ScheduledTransactionHandler"),
         "holdings": len(portfolio.holdings()),
         "account_kinds": sorted(KINDS) + ["loan"],
         "transaction_kinds": sorted(KIND_ENTITY),
@@ -548,8 +550,103 @@ def moneywiz_loan_schedule(loan: AccountRef) -> dict:
 
 @mcp.tool(annotations=READ)
 def moneywiz_list_budgets() -> list[dict]:
-    """List budgets with limit, spent and remaining as MoneyWiz computes them."""
-    return portfolio.budgets()
+    """List budgets: what they monitor, and the current period's budgeted, available (with rollover and
+    budget transfers), spent and remaining amounts as MoneyWiz computes them."""
+    return budgets.list()
+
+
+BudgetRef = Annotated[str, Field(description="Budget id, or its exact name")]
+BudgetRepeat = Annotated[Literal["none", "day", "week", "month", "year"], Field(description=(
+    'Budget period; "none" for a one-time budget between start_date and end_date'))]
+
+
+@mcp.tool(annotations=WRITE)
+def moneywiz_create_budget(
+    name: str, amount: Amount,
+    categories: Annotated[list[str], Field(description="Categories to monitor (paths or ids)")],
+    kind: Literal["expense", "income"] = "expense",
+    accounts: Annotated[list[str] | None, Field(default=None, description=(
+        "Accounts to monitor; default: every non-investment account, as in MoneyWiz"))] = None,
+    currency: Annotated[str | None, Field(default=None, description="Default: the ledger's default currency")] = None,
+    start_date: Annotated[str | None, Field(default=None, description=(
+        "First day; default: the 1st of the current month"))] = None,
+    repeat: BudgetRepeat = "month", every: Annotated[int, Field(description="Period length in units")] = 1,
+    end_date: Annotated[str | None, Field(default=None, description="One-time budgets: the last day")] = None,
+    rollover: Annotated[bool, Field(description="Carry unused money into the next period")] = False,
+    tags: Annotated[list[str] | None, Field(default=None, description=(
+        "Only count transactions with any of these tags"))] = None,
+    group: Annotated[str | None, Field(default=None, description="Budget group id or name")] = None,
+    icon: str | None = None,
+) -> dict:
+    """Create a budget. MoneyWiz's own budget limit for the subscription applies."""
+    return budgets.create(name=name, amount_=amount, categories=categories, kind=kind, accounts=accounts,
+                          currency=currency, start_date=start_date, repeat=repeat, every=every, end_date=end_date,
+                          rollover=rollover, tags=tags, group=group, icon=icon)
+
+
+@mcp.tool(annotations=EDIT)
+def moneywiz_update_budget(
+    budget: BudgetRef, name: str | None = None, amount: str | None = None,
+    apply_to: Annotated[list[Literal["past", "current", "future"]] | None, Field(default=None, description=(
+        "Repeating budgets: which periods a new amount applies to; default the current period, as in MoneyWiz"))] = None,
+    kind: Literal["expense", "income"] | None = None, accounts: list[str] | None = None,
+    categories: list[str] | None = None, currency: str | None = None, start_date: str | None = None,
+    repeat: BudgetRepeat | None = None, every: int | None = None, end_date: str | None = None,
+    rollover: bool | None = None,
+    tags: Annotated[list[str] | None, Field(default=None, description="Tag filter; [] removes it")] = None,
+    group: Annotated[str | None, Field(default=None, description='Budget group id or name; "" for none')] = None,
+    icon: str | None = None,
+) -> dict:
+    """Change a budget. Fields left out keep their values."""
+    changes = {k: v for k, v in dict(name=name, amount=amount, apply_to=apply_to, kind=kind, accounts=accounts,
+                                     categories=categories, currency=currency, start_date=start_date, repeat=repeat,
+                                     every=every, end_date=end_date, rollover=rollover, tags=tags, group=group,
+                                     icon=icon).items() if v is not None}
+    if not changes:
+        raise MoneyWizError("Give at least one field to change")
+    return budgets.update(budget, **changes)
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+def moneywiz_delete_budget(budget: BudgetRef) -> dict:
+    """Delete a budget. Transactions stay; transfers into or out of it are deleted, as in MoneyWiz."""
+    return budgets.delete(budget)
+
+
+@mcp.tool(annotations=WRITE)
+def moneywiz_transfer_between_budgets(
+    from_budget: BudgetRef, to_budget: BudgetRef, amount: Amount, date: When, description: str = "",
+    memo: str = "",
+    exchange_rate: Annotated[str | None, Field(default=None, description="When the budgets' currencies differ")] = None,
+) -> dict:
+    """Move money from one budget to another for the period of the date. Delete it with delete_transaction."""
+    return budgets.transfer(from_budget=from_budget, to_budget=to_budget, amount_=amount, date_=date,
+                            description=description, memo=memo, exchange_rate=exchange_rate)
+
+
+@mcp.tool(annotations=READ)
+def moneywiz_list_budget_groups() -> list[dict]:
+    """List budget groups and the budgets in each."""
+    return budgets.groups()
+
+
+@mcp.tool(annotations=WRITE)
+def moneywiz_create_budget_group(name: str, color: int = 1, budget_ids: list[str] | None = None) -> dict:
+    """Create a budget group, optionally with budgets in it."""
+    return budgets.create_group(name=name, color=color, budget_ids=budget_ids)
+
+
+@mcp.tool(annotations=EDIT)
+def moneywiz_update_budget_group(group: str, name: str | None = None, color: int | None = None,
+                                 budget_ids: list[str] | None = None) -> dict:
+    """Rename a budget group, change its color, or set exactly which budgets it holds."""
+    return budgets.update_group(group, name=name, color=color, budget_ids=budget_ids)
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+def moneywiz_delete_budget_group(group: str) -> dict:
+    """Delete a budget group. Its budgets stay, ungrouped."""
+    return budgets.delete_group(group)
 
 
 @mcp.tool(annotations=READ)
