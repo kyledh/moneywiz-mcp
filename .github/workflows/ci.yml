@@ -18,7 +18,16 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: uv sync --locked
       - run: uvx ruff check src tests scripts --select F,E9,B,SIM --line-length 120
-      - run: uv run pytest -q
+      - name: Offline tests in several time zones
+        # Output dates are local and a bare day means local noon. CI runs in UTC
+        # and the maintainer's Mac in UTC+8, so a test with a hard-coded offset
+        # passed locally and failed here once. Run with zero, positive and
+        # negative offsets so that kind of test fails in CI every time.
+        run: |
+          for tz in UTC Asia/Shanghai America/Los_Angeles; do
+            echo "TZ=$tz"
+            TZ=$tz uv run pytest -q
+          done
       - name: Agent bundle is up to date
         run: |
           (cd agent && npm ci)
