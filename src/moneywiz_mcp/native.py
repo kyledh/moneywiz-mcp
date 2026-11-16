@@ -154,8 +154,12 @@ class Native:
         return items[0] if items else None
 
     def invoke(self, target, selector: str, args: list, *, encoding: str | None = None,
-               fields=None, save: bool = True) -> dict:
+               fields=None, save: bool = True, quiet=()) -> dict:
+        """Call a business method. quiet names [class, selector] handlers that
+        only present UI, to be skipped while this call runs (see agent.js)."""
         spec = {"target": target, "selector": selector, "args": args, "fields": fields or [], "save": save}
+        if quiet:
+            spec["quiet"] = [list(handler) for handler in quiet]
         if encoding is None and target == "manager":
             encoding = SIGNATURES.get(selector)
             if encoding is None:

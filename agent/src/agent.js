@@ -415,6 +415,40 @@ function requireClean(e, state) {
   throw error;
 }
 
+// Some app observers do nothing but put up a dialog in reaction to a business
+// call (MoneyWiz answers every new transfer with a "transfer succeeded" alert).
+// A call may name such handlers in spec.quiet: each must be a void method with
+// one object argument, and it is skipped only while that call runs. Every
+// other invocation, including the app's own, goes through unchanged, and Frida
+// removes the replacement when the agent unloads.
+const quietHandlers = new Map(), quietActive = new Set();
+function quietHandler(className, selector) {
+  need(/^[A-Za-z_][A-Za-z0-9_]*$/.test(className) && /^[A-Za-z_][A-Za-z0-9_]*:$/.test(selector), 'Invalid quiet handler');
+  const key = `${className} ${selector}`;
+  if (!quietHandlers.has(key)) {
+    const k = C[className], method = k === undefined ? undefined : k['- ' + selector];
+    let installed = false;
+    if (method !== undefined && method.types === 'v24@0:8@16') {
+      const target = method.implementation;
+      const original = new NativeFunction(target, 'void', ['pointer', 'pointer', 'pointer']);
+      Interceptor.replace(target, new NativeCallback((self, cmd, arg) => {
+        if (!quietActive.has(key)) original(self, cmd, arg);
+      }, 'void', ['pointer', 'pointer', 'pointer']));
+      installed = true;
+    }
+    quietHandlers.set(key, installed);
+  }
+  return quietHandlers.get(key) ? key : null;
+}
+
+function quietly(spec, work) {
+  need(spec.quiet === undefined || Array.isArray(spec.quiet), 'quiet must be a list');
+  // A handler missing in this build only means its dialog is not suppressed.
+  const keys = (spec.quiet || []).map(([c, s]) => quietHandler(c, s)).filter(Boolean);
+  keys.forEach(k => quietActive.add(k));
+  try { return work(); } finally { keys.forEach(k => quietActive.delete(k)); }
+}
+
 function save(e) {
   const before = contextState(e);
   if (before.pending === 0) return { saved: false, before, after: before };
@@ -464,7 +498,7 @@ rpc.exports = {
       const e = env();
       const before = contextState(e);
       if (!spec.allow_dirty) requireClean(e, before);
-      const value = invokeOn(e, spec);
+      const value = quietly(spec, () => invokeOn(e, spec));
       const after = contextState(e);
       const out = { value, context_before: before, context_after: after };
       if (spec.save && after.pending > 0) out.save = save(e);
@@ -482,7 +516,7 @@ rpc.exports = {
         if (spec.query) {
           const objects = fetchObjects(e, spec.query);
           results.push({ items: objects.map(o => serialize(o, spec.query.fields)) });
-        } else results.push({ value: invokeOn(e, spec) });
+        } else results.push({ value: quietly(spec, () => invokeOn(e, spec)) });
       }
       const out = { results, context_after: contextState(e) };
       if (specs.some(s => s.save) && out.context_after.pending > 0) out.save = save(e);
