@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 from moneywiz_mcp.accounts import view as account_view
 from moneywiz_mcp.budgets import decode_tags, view as budget_view
-from moneywiz_mcp.native import SIGNATURES, decode
+from moneywiz_mcp.native import decode
 from moneywiz_mcp.scheduled import view as scheduled_view
 from moneywiz_mcp.transactions import view as transaction_view
 from moneywiz_mcp.values import local_tz
@@ -127,17 +127,101 @@ def test_scheduled_view_reads_the_raw_row():
     assert "next_due" not in done and "repeat" not in done and "on" not in done
 
 
-def test_shipped_signatures_cover_the_selectors_the_domains_call():
-    import inspect
+def test_every_call_has_a_recorded_signature():
+    # scripts/check_build.py compares exactly this table with a new MoneyWiz build,
+    # so every call the server makes must be in it.
+    from moneywiz_mcp import calls, native
 
-    from moneywiz_mcp import accounts, budgets, catalog, investments, portfolio, scheduled, settings, transactions
+    missing = sorted(x for x in calls.manager_selectors() if x not in native.MANAGER_SIGNATURES)
+    missing += sorted(f"{name} {key}" for name, key in calls.object_calls()
+                      if key not in native.CLASS_SIGNATURES.get(name, {}))
+    missing += sorted(f"{cls} - {sel}" for cls, sel in calls.quiet_handlers()
+                      if "- " + sel not in native.CLASS_SIGNATURES.get(cls, {}))
+    assert not missing, f"no recorded signature for {missing}"
+    for call in calls.invocations():
+        assert call["target"] is not None, f"receiver not written out at {call['module']}:{call['line']}"
+        if call["selectors"] is None and call["target"][0] != "manager":
+            # chosen at run time among methods the table lists for that receiver
+            assert native.CLASS_SIGNATURES.get(call["target"][1]), f"{call['module']}:{call['line']}"
 
-    for module in (accounts, budgets, catalog, investments, portfolio, scheduled, settings, transactions):
-        source = inspect.getsource(module)
-        for name in dir(module):
-            if name.startswith("_"):
-                continue  # fragments such as a shared selector tail
-            value = getattr(module, name)
-            for selector in value.values() if isinstance(value, dict) else [value]:
-                if isinstance(selector, str) and selector.endswith(":") and "invoke" in source and " " not in selector:
-                    assert selector in SIGNATURES, f"{module.__name__}.{name} is not a known build-466 selector"
+
+def test_recorded_encoding_is_looked_up_for_every_receiver():
+    from moneywiz_mcp.native import MoneyWizError, recorded_encoding
+    assert recorded_encoding("manager", "saveData") == "B16@0:8"
+    assert recorded_encoding({"cls": "TagsPredicate"}, "ORPredicateStringFromTagsNames:") == "@24@0:8@16"
+    assert recorded_encoding({"ref": ["Budget", "B1"]}, "remainingAmountForPeriodIndex:") == "@24@0:8q16"
+    assert recorded_encoding("user", "nonInvestmentAccountsArray") == "@16@0:8"
+    try:
+        recorded_encoding({"cls": "TagsPredicate"}, "somethingNew:")
+    except MoneyWizError as error:
+        assert "No build-466 signature" in str(error)
+    else:
+        raise AssertionError("an unrecorded call must be refused")
+
+
+def test_report_rows_read_moneywiz_columns():
+    from moneywiz_mcp.reports import _row, _rows
+
+    category = {"groupName": "Food", "groupObject": {"$ref": "Category", "gid": "C1"}, "groupAmount": -50,
+                "groupAmountPercent": 9.090909090909092, "groupValuesNamesArray": ["AMOUNT", "CURRENCY_NAME", "/",
+                                                                                  "AMOUNT_PERCENTS", "%"],
+                "groupValuesArray": [-50, "CNY", "/", 9.090909090909092, "%"], "transactionsArray#": 2,
+                "transactionsArray": [{"GID": "T1", "date": {"$date": 0}, "amount": -30, "desc": "x",
+                                       "accountCurrencyName": "CNY", "tagsNames": []}]}
+    row = _row(category)
+    assert row["object"] == {"type": "Category", "id": "C1"} and row["currency"] == "CNY"
+    assert row["figures"] == {"amount": "-50", "percent": "9.09090909"}
+    assert row["transaction_count"] == 2 and row["transactions"][0]["id"] == "T1"
+    assert "tags" not in row["transactions"][0]
+
+    # A period row with several columns, one of them left without a value: the group amount
+    # MoneyWiz leaves at 0 there is not a figure.
+    month = _row({"groupName": "Nov", "groupObject": {"$date": 1793462400}, "groupAmount": 0, "groupAmountPercent": 0,
+                  "groupValuesNamesArray": ["EXPENSES", "CURRENCY_NAME", "INCOMES", "CURRENCY_NAME",
+                                            "TRANSFERS_LOOSES", "CURRENCY_NAME"],
+                  "groupValuesArray": [550, "CNY", 800, "CNY"]})
+    assert month["figures"] == {"expenses": "550", "incomes": "800"} and month["date"].startswith("2026-1")
+    # Rows of a table carry their figure as the group amount; a percent of 0 is one not worked out.
+    cell = _row({"groupName": "Shop", "groupAmount": -550, "groupAmountPercent": 0,
+                 "subGroupesArray": [{"groupName": " "}, {"groupName": "Total", "groupAmount": -550}]})
+    assert cell["figures"] == {"amount": "-550"}
+    assert [r["name"] for r in cell["rows"]] == ["Total"], "blank spacer rows are dropped"
+    assert _rows([{"groupName": "Mixed", "groupValuesNamesArray": ["EXPENSES", "CURRENCY_NAME", "BUDGET_BALANCE",
+                                                                   "CURRENCY_NAME"],
+                   "groupValuesArray": [50, "CNY", 100, "USD"]}])[0]["currencies"] == \
+        {"expenses": "CNY", "budget_balance": "USD"}
+    account = _row({"groupName": "Cash", "groupObject": {"$object": "MWAccountDTO"}, "groupObject.GID": "A1"})
+    assert account["object"] == {"type": "Account", "id": "A1"}
+
+
+def test_report_series_and_statistics():
+    from moneywiz_mcp.reports import _series, _statistics
+
+    over_time = _series({"seriesName": "Cash", "currencyName": "CNY", "seriesXValue": [{"$date": 0}, {"$date": 86400}],
+                         "seriesYValue": [1000, 1250.0000000000002]})
+    assert over_time["values"] == ["1000", "1250"] and len(over_time["dates"]) == 2
+    pie = _series({"seriesName": "Food", "seriesXValue": [0.57], "seriesYValue": [50, 9.09]})
+    assert "dates" not in pie and "labels" not in pie, "slice angles are not data"
+    assert _series({"seriesName": "Shop", "seriesXValue": ["Nov"], "seriesYValue": [5]})["labels"] == ["Nov"]
+
+    stats = _statistics({"expensesAllTimeTotal": -550, "expensesDailyAvarage": -18.333333333333332,
+                         "expensesCurrencyName": "CNY", "topExpenseCategoriesNamesArray": ["Rent", "Food"],
+                         "topExpenseCategoriesAmountsArray": [500, 50],
+                         "topExpenseCategoriesPercentsArray": [90.9090909090909, 9.090909090909092],
+                         "topIncomePayeeNamesArray": [], "higestNetWorthAmount": 1800,
+                         "higestNetWorthDate": {"$date": 0}, "totalExpenseTransactionsCount": 3})
+    assert stats["expenses"] == {"daily_average": "-18.33333333", "total": "-550", "currency": "CNY"}
+    assert stats["top_expense_categories"][0] == {"name": "Rent", "amount": "500", "percent": "90.90909091"}
+    assert "top_income_payees" not in stats
+    assert stats["net_worth"]["highest"]["amount"] == "1800" and stats["transaction_counts"] == {"expense": 3}
+
+
+def test_report_data_checks_every_agent_call_against_the_table():
+    from moneywiz_mcp import calls, native
+    from moneywiz_mcp.reports import AGENT_CALLS
+
+    listed = native.recorded_calls(AGENT_CALLS)
+    assert ["TransactionsFilter", "- setUser:", "v24@0:8@16"] in listed
+    assert all(len(entry) == 3 and entry[2] for entry in listed)
+    assert ("CustomReport", "- setReportSortingType:") in calls.object_calls()
+    assert "forkToChildManagedObjectContext" in calls.manager_selectors()

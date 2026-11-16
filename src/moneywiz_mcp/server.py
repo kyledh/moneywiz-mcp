@@ -6,8 +6,11 @@ budget links and sync all stay the app's responsibility.
 """
 from __future__ import annotations
 
+import atexit
 import functools
 import os
+import signal
+import sys
 from typing import Annotated, Any, Literal
 
 from mcp.server.fastmcp import FastMCP
@@ -16,10 +19,12 @@ from pydantic import Field
 
 from .accounts import Accounts, KINDS
 from .investments import Investments
+from .lifecycle import Lifecycle
 from .catalog import Catalog
 from .native import Native, MoneyWizError
 from .budgets import Budgets
 from .portfolio import Portfolio
+from .reports import Reports, KINDS as REPORT_KINDS, PERIODS, BREAKDOWNS, CHARTS
 from .scheduled import Scheduled
 from .settings import Settings
 from .transactions import Transactions, KIND_ENTITY
@@ -44,7 +49,10 @@ DESTRUCTIVE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempote
 # Writes a local file but leaves the ledger alone.
 EXPORT = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
 
-native = Native(launch=os.environ.get("MONEYWIZ_LAUNCH", "") == "1")
+# MoneyWiz is launched hidden when it is not running (MONEYWIZ_LAUNCH=0 turns that off), and a
+# MoneyWiz the server launched is quit after MONEYWIZ_IDLE_MINUTES without use (0: never).
+native = Native(launch=os.environ.get("MONEYWIZ_LAUNCH", "1") != "0")
+lifecycle = Lifecycle(native, idle_minutes=float(os.environ.get("MONEYWIZ_IDLE_MINUTES", "10") or 0))
 
 
 def budget_warnings(notices: list[dict]) -> dict | None:
@@ -86,6 +94,7 @@ portfolio = Portfolio(native)
 investments = Investments(native)
 scheduled = Scheduled(native)
 budgets = Budgets(native)
+reports = Reports(native)
 
 AccountRef = Annotated[str, Field(description="Account id, or its exact name")]
 Amount = Annotated[str, Field(description='Positive decimal string, e.g. "12.50"')]
@@ -108,6 +117,7 @@ def moneywiz_status() -> dict:
         "app_version": status.get("version"), "app_build": status.get("build"),
         "database": status.get("store_path"),
         "unsaved_changes_in_app": status["context"]["pending"] > 0,
+        "app_lifecycle": lifecycle.describe() if native.lifecycle is not None else {"managed_by_server": False},
         "default_currency": ledger.get("default_currency"),
         "accounts": len(accounts.list()),
         "archived_accounts": len(accounts.list(include_archived=True)) - len(accounts.list()),
@@ -837,7 +847,128 @@ def moneywiz_execute_scheduled(
     return scheduled.execute(scheduled_id, amount)
 
 
+# ---------------------------------------------------------------- saved reports
+
+ReportKind = Annotated[str, Field(description="One of: " + ", ".join(REPORT_KINDS))]
+
+
+@mcp.tool(annotations=READ)
+def moneywiz_list_reports() -> list[dict]:
+    """List the reports saved in MoneyWiz's Reports section, with their settings."""
+    return reports.list()
+
+
+@mcp.tool(annotations=READ)
+def moneywiz_get_report_data(
+    report: Annotated[str, Field(description="Saved report id or name")],
+    transactions: Annotated[int, Field(description=(
+        "How many of each row's transactions to list (0-2000); 0 gives only their count"))] = 0,
+) -> dict:
+    """The figures of a saved report, computed by MoneyWiz as when the report is opened: its rows
+    (category, payee, account, budget or period, with nested rows for tables and drill-downs, and
+    MoneyWiz's own total and average rows), totals, chart series over time and, for a statistics
+    report, its averages, top categories and payees and net-worth points. Nothing is written: MoneyWiz
+    computes on a temporary copy that it discards. For figures no saved report gives, read the
+    transactions themselves."""
+    return reports.data(report, transactions=transactions)
+
+
+@write_tool(WRITE)
+def moneywiz_create_report(
+    kind: ReportKind, name: str,
+    period: Annotated[str | None, Field(default=None, description=(
+        "One of " + ", ".join(PERIODS) + '; default this_month (next_3_months for a forecast)'))] = None,
+    from_date: Annotated[str | None, Field(default=None, description="period custom: first day")] = None,
+    to_date: Annotated[str | None, Field(default=None, description="period custom: last day")] = None,
+    breakdown: Annotated[str, Field(description="Over-time reports: " + ", ".join(BREAKDOWNS))] = "month",
+    chart: Annotated[str, Field(description="Categories, payees and tags reports: " + ", ".join(CHARTS))] = "pie",
+    flow: Annotated[Literal["expense", "income"], Field(description="Category, payee and tag reports")] = "expense",
+    accounts: Annotated[list[str] | None, Field(default=None, description="Default: all active accounts")] = None,
+    categories: Annotated[list[str] | None, Field(default=None, description=(
+        "Default: all categories of the flow (profit_and_loss: the expense side)"))] = None,
+    income_categories: Annotated[list[str] | None, Field(default=None, description="profit_and_loss: income side")] = None,
+    payees: list[str] | None = None, tags: list[str] | None = None,
+    budgets: Annotated[list[str] | None, Field(default=None, description="compare_budgets")] = None,  # noqa: F811
+    budget: Annotated[str | None, Field(default=None, description="budget_balance: the budget")] = None,
+    as_of: Annotated[str | None, Field(default=None, description="summary_breakdown: the date; default today")] = None,
+    include_scheduled: Annotated[bool | None, Field(default=None, description=(
+        "Count scheduled transactions; default only for a forecast"))] = None,
+    include_archived: bool = False,
+    group: Annotated[str | None, Field(default=None, description="Report group id or name")] = None,
+) -> dict:
+    """Create a report in MoneyWiz's Reports section, as its report editor does, and save it there.
+    MoneyWiz computes and shows it; the report keeps its period (this month stays the current month)."""
+    return reports.create(kind=kind, name=name, period=period, from_date=from_date, to_date=to_date,
+                          breakdown=breakdown, chart=chart, flow=flow, accounts=accounts, categories=categories,
+                          income_categories=income_categories, payees=payees, tags=tags, budgets=budgets,
+                          budget=budget, as_of=as_of, include_scheduled=include_scheduled,
+                          include_archived=include_archived, group=group)
+
+
+@write_tool(EDIT)
+def moneywiz_update_report(
+    report: Annotated[str, Field(description="Report id, or its exact name")], name: str | None = None,
+    group: Annotated[str | None, Field(default=None, description='Report group id or name; "" for none')] = None,
+) -> dict:
+    """Rename a saved report or move it to another group. A rename keeps its place."""
+    return reports.update(report, name=name, group=... if group is None else group)
+
+
+@write_tool(EDIT)
+def moneywiz_reorder_reports(
+    ordered_reports: Annotated[list[str], Field(description="Every saved report of the group, in the new order")],
+    group: Annotated[str | None, Field(default=None, description="Report group id or name; leave out for ungrouped")] = None,
+) -> list[dict]:
+    """Set the order of the saved reports in one group."""
+    return reports.reorder(ordered_reports, group)
+
+
+@write_tool(DESTRUCTIVE)
+def moneywiz_delete_report(report: str) -> dict:
+    """Delete a saved report. The ledger is not affected."""
+    return reports.delete(report)
+
+
+@mcp.tool(annotations=READ)
+def moneywiz_list_report_groups() -> list[dict]:
+    """List report groups and the saved reports in each."""
+    return reports.groups()
+
+
+@write_tool(WRITE)
+def moneywiz_create_report_group(name: str, color: int = 1, currency: str | None = None,
+                                 report_ids: list[str] | None = None) -> dict:
+    """Create a report group, optionally with saved reports in it."""
+    return reports.create_group(name=name, color=color, currency=currency, report_ids=report_ids)
+
+
+@write_tool(EDIT)
+def moneywiz_update_report_group(group: str, name: str | None = None, color: int | None = None,
+                                 report_ids: list[str] | None = None) -> dict:
+    """Rename a report group, change its color, or set exactly which saved reports it holds."""
+    return reports.update_group(group, name=name, color=color, report_ids=report_ids)
+
+
+@write_tool(DESTRUCTIVE)
+def moneywiz_delete_report_group(group: str) -> dict:
+    """Delete a report group. Its reports stay, ungrouped."""
+    return reports.delete_group(group)
+
+
+@write_tool(EDIT)
+def moneywiz_reorder_report_groups(ordered_groups: list[str]) -> list[dict]:
+    """Set the order of all report groups."""
+    return reports.reorder_groups(ordered_groups)
+
+
 def main() -> None:
+    if native._launch:
+        native.lifecycle = lifecycle
+        lifecycle.start()
+        atexit.register(lifecycle.at_exit)
+        # MCP clients stop a server with SIGTERM as well as by closing its input;
+        # exit normally either way so a MoneyWiz it launched is quit.
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     mcp.run()
 
 

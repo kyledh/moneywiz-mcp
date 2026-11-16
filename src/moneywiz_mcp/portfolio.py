@@ -11,7 +11,8 @@ HOLDING_FIELDS = ["symbol", "symbolAlias", "desc", "assetClass", "holdingType", 
                   "openningNumberOfShares", "costBasisOfMissingOBShares", "investmentObjectType",
                   "isPricePerShareAvailableOnline", "isFromOnlineBanking",
                   "investmentAccount.GID", "investmentAccount.name", "investmentAccount.currencyName",
-                  "numberOfShares", "currentValue", "costBasis", "profitLoss"]
+                  "numberOfShares", "totalPrice", "costBasis", "unrealizedGain", "realizedGain", "totalReturn",
+                  "totalReturnPercents"]
 PLAN_FIELDS = ["apr", "durationMonths", "firstDueDate", "startDate", "planType", "principalAmount",
                "accountPayments.GID", "accountPayments.name", "categoryPrincipal.name", "categoryInterest.name",
                "payee.name", "loanAccount.GID", "loanAccount.name"]
@@ -26,9 +27,13 @@ def holding_view(row: dict) -> dict:
         "shares": money(row.get("numberOfShares")),
         "opening_shares": money(row.get("openningNumberOfShares")),
         "price_per_share": stored(row.get("pricePerShare")),
-        "current_value": money(row.get("currentValue")),
+        # MoneyWiz's own figures: market value (totalPrice) and gains.
+        "market_value": money(row.get("totalPrice")),
         "cost_basis": money(row.get("costBasis")),
-        "profit_loss": money(row.get("profitLoss")),
+        "unrealized_gain": money(row.get("unrealizedGain")),
+        "realized_gain": money(row.get("realizedGain")),
+        "total_return": money(row.get("totalReturn")),
+        "total_return_percent": money(row["totalReturnPercents"] * 100) if row.get("totalReturnPercents") is not None else None,
         "online_price": bool(row.get("isPricePerShareAvailableOnline")) or None,
     })
 

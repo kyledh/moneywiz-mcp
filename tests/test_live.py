@@ -19,6 +19,7 @@ from moneywiz_mcp.catalog import Catalog
 from moneywiz_mcp.investments import Investments
 from moneywiz_mcp.native import MoneyWizError, Native, s
 from moneywiz_mcp.portfolio import Portfolio
+from moneywiz_mcp.reports import KINDS as REPORT_KINDS, Reports
 from moneywiz_mcp.scheduled import Scheduled
 from moneywiz_mcp.settings import Settings
 from moneywiz_mcp.transactions import Transactions
@@ -44,10 +45,20 @@ def drop_budgets(native: Native):
             budgets.delete_group(group["id"])
 
 
+def drop_reports(native: Native):
+    reports = Reports(native)
+    for row in native.query("CustomReport", where=[["name", "begins", s(SANDBOX)]], fields=[])["items"]:
+        native.invoke("manager", "deleteCustomReport:", [{"ref": ["CustomReport", row["gid"]]}])
+    for group in reports.groups():
+        if group["name"].startswith(SANDBOX):
+            reports.delete_group(group["id"])
+
+
 def cleanup(native: Native):
     accounts, catalog, transactions = Accounts(native), Catalog(native), Transactions(native)
     drop_scheduled(native)
     drop_budgets(native)
+    drop_reports(native)
     for account in native.query("Account", where=[["name", "begins", s(SANDBOX)]], fields=["name"])["items"]:
         for row in native.query("Transaction", where=[["account.GID", "eq", s(account["gid"])]], fields=[])["items"]:
             if native.get("Transaction", row["gid"]):  # a transfer's other leg, or an expense's refunds, may be gone
@@ -818,3 +829,127 @@ def test_scheduled_transfer_categories_and_foreign_currency(live):
                     transactions.delete(row["gid"])
             accounts.delete(account["id"])
         catalog.delete("Category", category["id"])
+
+
+def test_saved_reports_and_groups(live):
+    accounts, catalog, native = live["accounts"], live["catalog"], live["native"]
+    reports, budgets = Reports(native), Budgets(native)
+    saved_before = len(reports.list())
+    account = accounts.create(group_id=live["group"], name=SANDBOX + "REPA", kind="cash", currency="CNY", opening_balance="10")
+    expense = catalog.create_category(SANDBOX + "REPE", "expense")
+    income = catalog.create_category(SANDBOX + "REPI", "income")
+    payee, tag = catalog.create_named("Payee", SANDBOX + "REPP"), catalog.create_named("Tag", SANDBOX + "REPT")
+    budget = budgets.create(name=SANDBOX + "REPB", amount_="10", categories=[expense["id"]], accounts=[account["id"]],
+                            start_date="2026-11-01")
+    common = dict(accounts=[account["id"]], categories=[expense["id"]], income_categories=[income["id"]],
+                  payees=[payee["id"]], tags=[tag["id"]], budgets=[budget["id"]], budget=budget["id"])
+    try:
+        made = {kind: reports.create(kind=kind, name=SANDBOX + kind, **common) for kind in REPORT_KINDS}
+        assert all(made[kind]["kind"] == kind for kind in REPORT_KINDS), "each creator stores its own report type"
+        assert native.status()["context"]["pending"] == 0, "nothing is left unsaved"
+        assert made["forecast"]["period"] == "next_3_months" and made["forecast"]["include_scheduled"] is True
+        custom = reports.create(kind="categories", name=SANDBOX + "range", period="custom", from_date="2026-01-01",
+                                to_date="2026-06-30", chart="bar", **common)
+        assert custom["from_date"].startswith("2026-01-01") and custom["to_date"].startswith("2026-07-01")
+        assert custom["chart"] == "bar"
+        with pytest.raises(MoneyWizError):
+            reports.create(kind="budget_balance", name=SANDBOX + "nobudget")
+
+        first, second, third = made["categories"]["id"], made["payees"]["id"], made["tags"]["id"]
+        group = reports.create_group(name=SANDBOX + "RG", report_ids=[first, second])
+        assert group["report_ids"] == [first, second]
+        assert reports.update(third, group=group["id"])["group_id"] == group["group_id"]
+        assert [x["id"] for x in reports.reorder([third, second, first], group=group["id"])] == [third, second, first]
+        renamed = reports.update(second, name=SANDBOX + "renamed")
+        assert renamed["name"] == SANDBOX + "renamed" and renamed["display_order"] == 1, "a rename keeps its place"
+        assert "group_id" not in reports.update(third, group="")
+        removed = reports.delete_group(group["id"])
+        assert set(removed["report_ids"]) == {first, second}
+        assert all("group_id" not in reports.get(x) for x in (first, second)), "its reports stay, ungrouped"
+        for report in [*made.values(), custom]:
+            reports.delete(report["id"])
+        assert len(reports.list()) == saved_before
+    finally:
+        drop_reports(native)
+        drop_budgets(native)
+        accounts.delete(account["id"])
+        for item in (expense, income):
+            catalog.delete("Category", item["id"])
+        catalog.delete("Payee", payee["id"])
+        catalog.delete("Tag", tag["id"])
+
+
+def test_saved_report_figures_leave_nothing_behind(live):
+    accounts, catalog, native, transactions = live["accounts"], live["catalog"], live["native"], live["transactions"]
+    reports = Reports(native)
+    # What a forecast's calculation writes into its context (it records future occurrences of every
+    # scheduled transaction); none of it may reach the ledger.
+    def schedules():
+        def rows(entity, fields):
+            return sorted(native.query(entity, fields=fields)["items"], key=lambda r: r["gid"] or "")
+        return (rows("ScheduledTransactionHandler", ["executeDate", "executesCount"]),
+                native.count("PaymentPlanItem", [["paid", "eq", {"nb": True}]]), native.count("CategoryAssigment"))
+    account = accounts.create(group_id=live["group"], name=SANDBOX + "FIGA", kind="cash", currency="CNY",
+                              opening_balance="1000")
+    food = catalog.create_category(SANDBOX + "FIGFOOD", "expense")
+    rent = catalog.create_category(SANDBOX + "FIGRENT", "expense")
+    pay = catalog.create_category(SANDBOX + "FIGPAY", "income")
+    for amount, category, day in (("30", food, "2026-11-03"), ("20", food, "2026-11-10"), ("500", rent, "2026-11-05")):
+        transactions.create(account=account["id"], kind="expense", amount_=amount, date_=day, categories=category["id"],
+                            description=SANDBOX + "fig", payee=SANDBOX + "FIGSHOP")
+    transactions.create(account=account["id"], kind="income", amount_="800", date_="2026-11-01",
+                        categories=pay["id"], description=SANDBOX + "fig")
+    schedules_before = schedules()
+    november = dict(period="custom", from_date="2026-11-01", to_date="2026-11-30", accounts=[account["id"]],
+                    categories=[food["id"], rent["id"]], income_categories=[pay["id"]])
+    try:
+        def figures(kind, transactions=0, **options):
+            report = reports.create(kind=kind, name=SANDBOX + "fig-" + kind, **(november | options))
+            data = reports.data(report["id"], transactions=transactions)
+            assert native.status()["context"]["pending"] == 0, f"{kind}: computing left something unsaved"
+            return data
+
+        cats = figures("categories", transactions=1)
+        assert cats["totals"] == {"figures": {"amount": "-550", "percent": "100"}, "currency": "CNY"}
+        by_name = {row["name"]: row for row in cats["rows"]}
+        assert by_name[SANDBOX + "FIGFOOD"]["figures"]["amount"] == "-50"
+        assert by_name[SANDBOX + "FIGFOOD"]["object"] == {"type": "Category", "id": food["id"]}
+        assert by_name[SANDBOX + "FIGFOOD"]["transaction_count"] == 2
+        assert len(by_name[SANDBOX + "FIGFOOD"]["transactions"]) == 1, "listed up to the count asked for"
+        assert by_name[SANDBOX + "FIGRENT"]["figures"]["amount"] == "-500"
+
+        flow = figures("cashflow")
+        month = next(row for row in flow["rows"] if row.get("date", "").startswith("2026-11-01"))
+        assert month["figures"]["expenses"] == "550" and month["figures"]["incomes"] == "800"
+        assert "transactions" not in month and month["transaction_count"] == 4
+
+        stats = figures("statistics")["statistics"]
+        assert stats["expenses"]["total"] == "-550" and stats["incomes"]["total"] == "800"
+        assert [c["name"] for c in stats["top_expense_categories"]] == [SANDBOX + "FIGRENT", SANDBOX + "FIGFOOD"]
+        assert stats["transaction_counts"]["expense"] == 3 and stats["transaction_counts"]["income"] == 1
+
+        balance = figures("balance_over_time")
+        row = next(r for r in balance["rows"] if r.get("object", {}).get("id") == account["id"])
+        assert row["figures"]["balance"] == "1250"
+        assert balance["series"][0]["values"][-1] == "1250" and len(balance["series"][0]["dates"]) >= 2
+
+        table = figures("payees_by_category_table", payees=[SANDBOX + "FIGSHOP"])
+        shop = next(r for r in table["rows"] if r["name"] == SANDBOX + "FIGSHOP")
+        assert {r["name"]: r["figures"]["amount"] for r in shop["rows"] if r.get("object")} == \
+            {SANDBOX + "FIGFOOD": "-50", SANDBOX + "FIGRENT": "-500"}
+
+        forecast = reports.create(kind="forecast", name=SANDBOX + "fig-forecast", accounts=[account["id"]])
+        assert any(r.get("object", {}).get("id") == account["id"] for r in reports.data(forecast["id"])["rows"])
+        net_worth = reports.create(kind="net_worth", name=SANDBOX + "fig-networth")
+        assert "series" in reports.data(net_worth["id"])  # every account; nothing about them is asserted
+        assert native.status()["context"]["pending"] == 0
+        assert schedules() == schedules_before, "the forecast's scratch occurrences stayed out of the ledger"
+        with pytest.raises(MoneyWizError):
+            reports.data(SANDBOX + "no such report")
+    finally:
+        drop_reports(native)
+        accounts.delete(account["id"], confirm_transactions=4)
+        for item in (food, rent, pay):
+            catalog.delete("Category", item["id"])
+        for row in catalog.payees(SANDBOX + "FIGSHOP"):
+            catalog.delete("Payee", row["id"])

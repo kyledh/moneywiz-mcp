@@ -136,7 +136,7 @@ class Scheduled:
         dates = []
         for index in range(1, count + 1):
             value = self.n.invoke(ref("ScheduledTransactionHandler", scheduled_id), "nextExecuteDateWithNum:",
-                                  [{"i": index}], encoding="@24@0:8q16", save=False)["value"]
+                                  [{"i": index}], save=False)["value"]
             if not value or (end is not None and datetime.fromisoformat(value).timestamp() > end):
                 break
             dates.append(show_date(value))
@@ -147,7 +147,7 @@ class Scheduled:
         last occurrence. Its execute method does not check this and would
         record the last occurrence again."""
         return bool(self.n.invoke({"cls": "ScheduledTransactionDataManager"}, "isTransactionCompleted:",
-                                  [ref("ScheduledTransactionHandler", scheduled_id)], encoding="B24@0:8@16",
+                                  [ref("ScheduledTransactionHandler", scheduled_id)],
                                   save=False)["value"])
 
     def _view(self, row: dict) -> dict:

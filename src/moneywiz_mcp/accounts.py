@@ -151,10 +151,10 @@ class Accounts:
             raise MoneyWizError("name: text required")
         validator = cls("DataValidatorHelper")
         if account_id is None:
-            ok = self.n.invoke(validator, "validateAccountName:", [s(name)], save=False, encoding="B24@0:8@16")["value"]
+            ok = self.n.invoke(validator, "validateAccountName:", [s(name)], save=False)["value"]
         else:
             ok = self.n.invoke(validator, "validateAccountEditName:forAccount:", [s(name), ref("Account", account_id)],
-                               save=False, encoding="B32@0:8@16@24")["value"]
+                               save=False)["value"]
         if not ok:
             raise MoneyWizError(f"MoneyWiz rejects the account name {name!r}: it is empty or another account uses it")
 

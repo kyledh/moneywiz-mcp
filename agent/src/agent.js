@@ -110,7 +110,7 @@ function ref(o) {
 //   {dec} NSDecimalNumber  {date} NSDate from unix seconds  {ref:[entity,gid]}
 //   {arr:[...]} NSArray  {set:[...]} NSSet  {dict:{k:typed}}  {nil:true}
 //   {user:true} {manager:true}  {cls:name}  primitives: {b} {i} {d}
-const OBJECT_TAGS = ['s', 'n', 'ni', 'nbig', 'nb', 'dec', 'date', 'ref', 'arr', 'set', 'dict', 'nil', 'user', 'manager'];
+const OBJECT_TAGS = ['s', 'n', 'ni', 'nbig', 'nb', 'dec', 'date', 'ref', 'arr', 'set', 'dict', 'nil', 'user', 'manager', 'prev'];
 
 function tagOf(arg) {
   need(arg !== null && typeof arg === 'object' && !Array.isArray(arg), 'typed argument object required');
@@ -152,6 +152,13 @@ function toObjC(e, arg) {
     case 'nil': return null;
     case 'user': return e.user;
     case 'manager': return e.manager;
+    // {prev: i}: the object returned by the i-th call earlier in the same batch.
+    case 'prev': {
+      need(e.produced && Number.isSafeInteger(v) && v >= 0 && v < e.produced.length, 'prev: no such earlier result');
+      const o = e.produced[v];
+      need(!isNil(o), 'prev: that call returned nothing');
+      return o;
+    }
     default: fail('not an object argument: ' + tag);
   }
 }
@@ -362,6 +369,7 @@ function invokeOn(e, spec) {
     need(typeof arg.d === 'number' && Number.isFinite(arg.d), 'd: number'); return arg.d;
   });
   const result = method.apply(receiver, values);
+  if (e.produced && types[0] === '@') e.produced.push(isNil(result) ? null : result);
   if (types[0] === 'v') return null;
   if (types[0] === '@') return isNil(result) ? null : (kindOf(result, C.NSManagedObject) ? serialize(result, spec.fields) : toJS(result));
   return result;
@@ -552,7 +560,6 @@ function quietly(spec, work) {
   const methods = (spec.quiet || []).map(([c, s]) => quietMethod(c, s)).filter(Boolean);
   const saved = methods.map(m => m.implementation);
   methods.forEach(m => { m.implementation = NOOP; });
-  captured = [];
   try { return work(); } finally { methods.forEach((m, i) => { m.implementation = saved[i]; }); }
 }
 
@@ -565,9 +572,144 @@ function save(e) {
   return { saved: Boolean(ok), before, after: contextState(e) };
 }
 
+// ---------------------------------------------------------------- reports
+
+// The 15-argument creator MoneyWiz's own report calculation uses.
+const REPORT_CREATE = 'createReportForUser:predefinedReportType:mainDataType:filters:chartType:chartOptions:' +
+  'chartBreakPeriod:predefinedDatesPeriod:fromDate:toDate:calculateData:oldRootGroup:' +
+  'includeScheduledTransactions:includeArchivedAccounts:delegate:';
+const pending = new Set(); // blocks handed to another queue, kept alive until they ran
+
+// Methods the caller recorded, checked before anything runs: [[class, "- selector", encoding]].
+// Returns a lookup that refuses any method the caller did not list.
+function checkedCalls(list) {
+  need(Array.isArray(list), 'calls: [[class, "- selector", encoding], ...]');
+  const found = new Map();
+  for (const [className, selector, encoding] of list) {
+    need(typeof className === 'string' && /^[-+] [A-Za-z_][A-Za-z0-9_:]*$/.test(selector), 'Invalid call ' + selector);
+    const k = C[className];
+    need(k !== undefined, 'Class not found: ' + className);
+    const m = k[selector];
+    need(m !== undefined, `${className} ${selector}: missing in this MoneyWiz build`);
+    need(m.types.replace(/[0-9]/g, '') === String(encoding).replace(/[0-9]/g, ''),
+      `Signature of ${className} ${selector} changed: ${m.types}`);
+    found.set(`${className} ${selector}`, m);
+  }
+  return (className, selector) => {
+    const m = found.get(`${className} ${selector}`);
+    need(m !== undefined, `${className} ${selector} was not checked`);
+    return m;
+  };
+}
+
+// A tree of plain result objects (a report's chart and its groups), read by
+// named shapes: {fields: [key paths], each: {key: [shape, limit]}}. A
+// collection under `each` is read item by item, up to `limit` items, and its
+// size is reported as key + '#'.
+function shaped(o, shapes, name, limit, budget) {
+  if (isNil(o)) return null;
+  const shape = shapes[name];
+  need(shape, 'Unknown result shape ' + name);
+  if (kindOf(o, C.NSArray) || kindOf(o, C.NSSet) || kindOf(o, C.NSOrderedSet)) {
+    const array = kindOf(o, C.NSArray) ? o : (kindOf(o, C.NSSet) ? o.allObjects() : o.array());
+    const n = Number(array.count()), out = [];
+    for (let i = 0; i < (limit === null || limit === undefined ? n : Math.min(n, limit)); i++)
+      out.push(shaped(array.objectAtIndex_(i), shapes, name, null, budget));
+    return out;
+  }
+  need(--budget.nodes >= 0, 'Report too large to return');
+  const out = {};
+  for (const field of shape.fields || []) {
+    const v = readPath(o, field.split('.'));
+    if (v !== undefined) out[field] = v;
+  }
+  for (const [key, [sub, max]] of Object.entries(shape.each || {})) {
+    const v = readKey(o, key);
+    if (v === undefined || isNil(v)) continue;
+    out[key] = shaped(v, shapes, sub, max, budget);
+    if (kindOf(v, C.NSArray) || kindOf(v, C.NSSet) || kindOf(v, C.NSOrderedSet)) out[key + '#'] = Number(v.count());
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- app lifecycle
+
+// The server can run MoneyWiz by itself: launched hidden, kept out of the Dock
+// and Cmd-Tab while nobody looks at it, and quit when idle (lifecycle.py).
+// These only act while MoneyWiz is hidden, inactive and has no window shown.
+function windowState() {
+  const app = C.NSApplication.sharedApplication(), windows = app.windows();
+  let shown = 0;
+  for (let i = 0; i < Number(windows.count()); i++) {
+    const w = windows.objectAtIndex_(i);
+    if (w.isVisible() || w.isMiniaturized()) shown++;
+  }
+  const out = { active: Boolean(app.isActive()), hidden: Boolean(app.isHidden()), shown_windows: shown,
+    background: Number(app.activationPolicy()) === 1 };
+  out.in_use = out.active || !out.hidden || shown > 0;
+  return [app, out];
+}
+
+// MoneyWiz's own record of iCloud work (MWDatabaseManager; both counters are
+// read under its event lock). Quitting while it exports would only delay the
+// upload to the next launch, but there is no reason to.
+function cloudState(method) {
+  const db = method('MWDatabaseManager', '+ sharedManager').call(C.MWDatabaseManager);
+  need(!isNil(db), 'MoneyWiz has no database manager');
+  const out = { events: Number(method('MWDatabaseManager', '- activeCloudKitEventCount').call(db)),
+    exporting: Boolean(method('MWDatabaseManager', '- hasActiveExportEvents').call(db)),
+    startup_sync: Boolean(method('MWDatabaseManager', '- isStartupSyncActivityInProgress').call(db)) };
+  out.busy = out.events > 0 || out.exporting || out.startup_sync;
+  return out;
+}
+
 // ---------------------------------------------------------------- rpc
 
 rpc.exports = {
+  // Read-only. Window state is there from launch; the ledger and iCloud
+  // parts once MoneyWiz has finished starting.
+  appState(calls) {
+    return onMain(() => {
+      const [, out] = windowState();
+      try {
+        const e = env();
+        out.pending = contextState(e).pending;
+        out.cloud = cloudState(checkedCalls(calls));
+      } catch (err) { out.not_ready = err.message; }
+      return out;
+    });
+  },
+
+  // Keep MoneyWiz out of the Dock and Cmd-Tab (accessory policy) or put it back.
+  background(on) {
+    return onMain(() => {
+      need(typeof on === 'boolean', 'background: true or false');
+      const [app, state] = windowState();
+      if (on && state.in_use) return { background: state.background, refused: 'MoneyWiz is in use' };
+      if (state.background !== on) app.setActivationPolicy_(on ? 1 : 0);
+      return { background: Number(app.activationPolicy()) === 1 };
+    });
+  },
+
+  // MoneyWiz's own quit (as Cmd-Q: its applicationWillTerminate: saves and
+  // updates the Dock badge), only when nobody is using it, nothing is unsaved
+  // and iCloud is idle. It runs half a second after replying, from a run-loop
+  // timer of the app's own (no JavaScript involved), so the caller can detach
+  // first: an attached session holds up the exit by about 30 s.
+  quit(calls) {
+    return onMain(() => {
+      const e = env(), method = checkedCalls(calls), [, state] = windowState();
+      if (state.in_use) return { quit: false, reason: 'MoneyWiz is in use' };
+      const pending = contextState(e).pending;
+      if (pending) return { quit: false, reason: `MoneyWiz holds ${pending} unsaved changes` };
+      const cloud = cloudState(method);
+      if (cloud.busy) return { quit: false, reason: 'iCloud sync in progress', cloud };
+      const app = C.NSApplication.sharedApplication();
+      app.performSelector_withObject_afterDelay_(ObjC.selector('terminate:'), NULL, 0.5);
+      return { quit: true };
+    });
+  },
+
   ping() { return { pid: Process.id }; },
 
   status() {
@@ -607,6 +749,7 @@ rpc.exports = {
       const e = env();
       const before = contextState(e);
       if (!spec.allow_dirty) requireClean(e, before);
+      captured = [];
       const value = quietly(spec, () => invokeOn(e, spec));
       const after = contextState(e);
       const out = { value, context_before: before, context_after: after };
@@ -618,19 +761,34 @@ rpc.exports = {
   },
 
   // Several calls in one main-queue turn; stops at the first failure.
+  // Several calls in one main-queue turn, for a business object that takes
+  // two calls (a report is created unsaved, then saved). A later call can name
+  // an earlier one's object as {prev: i}, counting calls that returned an
+  // object. Stops at the first failure and deletes what the batch inserted,
+  // so nothing half-made is left for MoneyWiz's next save.
   batch(specs) {
     return onMain(() => {
       const e = env();
       requireClean(e, contextState(e));
+      e.produced = [];
       const results = [];
-      for (const spec of specs) {
-        if (spec.query) {
-          const objects = fetchObjects(e, spec.query);
-          results.push({ items: objects.map(o => serialize(o, spec.query.fields)) });
-        } else results.push({ value: quietly(spec, () => invokeOn(e, spec)) });
+      captured = [];
+      try {
+        for (const spec of specs) {
+          if (spec.query) {
+            const objects = fetchObjects(e, spec.query);
+            results.push({ items: objects.map(o => serialize(o, spec.query.fields)) });
+          } else results.push({ value: quietly(spec, () => invokeOn(e, spec)) });
+        }
+      } catch (error) {
+        for (const o of e.produced)
+          if (!isNil(o) && kindOf(o, C.NSManagedObject) && o.isInserted()) e.context.deleteObject_(o);
+        throw error;
       }
       const out = { results, context_after: contextState(e) };
       if (specs.some(s => s.save) && out.context_after.pending > 0) out.save = save(e);
+      const notices = takeNotices();
+      if (notices.length) out.notices = notices;
       return out;
     });
   },
@@ -700,6 +858,132 @@ rpc.exports = {
       const others = objects.filter(o => !allowed.has(`${o.entity().name()} ${ref(o).gid}`));
       if (others.length) return { saved: false, pending: objects.length, others: others.length };
       return save(e);
+    });
+  },
+
+  // Figures of a saved report, computed the way MoneyWiz computes one it shows
+  // (-[MoneyWizManager calculateDataForReportAsync:delegate:]): a temporary copy
+  // of the report in a child context forked from the main one, with saving,
+  // sync tracking and notifications off, and that context reset afterwards.
+  // The calculation writes scratch state into its context (every account's
+  // display mode; for forecasts, future occurrences of scheduled transactions
+  // with their schedules advanced), so it must never run in the main context.
+  // spec: {gid, calls: [[class, "- selector", encoding]], fields, root: {key: shape},
+  //        shapes: {name: {fields, each: {key: [shape, limit]}}}, max_nodes, timeout}
+  reportData(spec) {
+    return new Promise((resolve, reject) => ObjC.schedule(ObjC.mainQueue, () => {
+      const held = [];
+      const hold = o => { if (!isNil(o)) { o.retain(); held.push(o); } return o; };
+      let timer = null;
+      try {
+        const e = env(), method = checkedCalls(spec.calls);
+        const report = lookup(e, 'CustomReport', spec.gid);
+        need(Boolean(toJS(report.valueForKey_(nsString('isReportSaved')))), 'Not a saved report');
+        const value = key => report.valueForKey_(nsString(key));
+        const int = key => { const v = value(key); return isNil(v) ? 0 : Number(v.intValue()); };
+        const bool = key => { const v = value(key); return !isNil(v) && Boolean(v.boolValue()); };
+        const settings = [int('predefinedReportType'), int('mainDataType')];
+        const stored = value('filtersArray');
+        const filters = C.NSArray.alloc().initWithArray_copyItems_(isNil(stored) ? C.NSArray.array() : stored, true);
+        held.push(filters); // alloc/init: already ours
+        const setUser = method('TransactionsFilter', '- setUser:');
+        for (let i = 0; i < Number(filters.count()); i++) {
+          const f = filters.objectAtIndex_(i), m = f.respondsToSelector_(ObjC.selector('setUser:')) ? f['- setUser:'] : null;
+          need(m && m.types.replace(/[0-9]/g, '') === setUser.types.replace(/[0-9]/g, ''), `Report filter ${f.$className} changed`);
+        }
+        const rest = [int('chartType'), int('chartOptions'), int('breakdownPeriod'), int('predefinedDatesPeriod'),
+          hold(value('fromDate')), hold(value('toDate'))];
+        const flags = [bool('includeSheduledTransactions'), bool('includeArchivedAccounts')];
+        const sorting = hold(value('reportSortingType'));
+        const userID = hold(e.user.objectID());
+        const child = hold(method('MoneyWizManager', '- forkToChildManagedObjectContext').call(e.manager));
+        need(!isNil(child), 'MoneyWiz did not fork a context for the report');
+        const childContext = hold(method('DataAccessor', '- managedObjectContext')
+          .call(method('MoneyWizManager', '- dataAccessor').call(child)));
+        childContext.userInfo().setObject_forKey_(C.NSNumber.numberWithBool_(true), nsString('dontTrackSyncChanges'));
+        method('MoneyWizManager', '- disableExternalNotifications').call(child);
+        method('MoneyWizManager', '- disableDataSavingFromSource:').call(child, nsString('moneywiz-mcp reportData'));
+        const create = method('MoneyWizManager', '- ' + REPORT_CREATE);
+        const setSorting = method('CustomReport', '- setReportSortingType:');
+        // On a timeout the caller gets an error, but nothing the block uses is released until the
+        // block has run (it then skips the calculation); if it never runs, those objects leak.
+        const state = { abandoned: false }, seconds = spec.timeout || 120;
+        timer = setTimeout(() => {
+          state.abandoned = true;
+          reject(new Error(`MoneyWiz did not finish the report within ${seconds} s`));
+        }, seconds * 1000);
+        const block = new ObjC.Block({ retType: 'void', argTypes: [], implementation: () => {
+          let out = null, error = null;
+          try {
+            if (!state.abandoned) {
+              const user = childContext.objectWithID_(userID);
+              for (let i = 0; i < Number(filters.count()); i++) filters.objectAtIndex_(i).setUser_(user);
+              const temp = create.call(child, user, ...settings, filters, ...rest, true, NULL, ...flags, NULL);
+              need(!isNil(temp), 'MoneyWiz did not compute the report');
+              if (!isNil(sorting)) setSorting.call(temp, sorting);
+              const budget = { nodes: spec.max_nodes || 50000 };
+              out = {};
+              for (const key of spec.fields || []) { const v = readKey(temp, key); if (v !== undefined) out[key] = toJS(v); }
+              for (const [key, shape] of Object.entries(spec.root || {})) {
+                const v = readKey(temp, key);
+                if (v !== undefined) out[key] = shaped(v, spec.shapes, shape, null, budget);
+              }
+            }
+          } catch (err) { error = err; } finally {
+            try { childContext.reset(); } catch (err) { error = error || err; }
+          }
+          ObjC.schedule(ObjC.mainQueue, () => {
+            clearTimeout(timer);
+            pending.delete(block);
+            held.forEach(o => o.release());
+            if (error) reject(new Error(error.message || String(error))); else resolve(out);
+          });
+        } });
+        pending.add(block);
+        childContext.performBlock_(block);
+      } catch (err) {
+        if (timer !== null) clearTimeout(timer);
+        held.forEach(o => o.release());
+        reject(err);
+      }
+    }));
+  },
+
+  // Read-only introspection for scripts/check_build.py: what a new MoneyWiz
+  // build offers for the methods, ivars and model the server relies on.
+  signatures(pairs) {
+    need(Array.isArray(pairs), 'signatures: [[class, "- selector"], ...]');
+    return pairs.map(([className, selector]) => {
+      const k = C[className];
+      if (k === undefined) return null;
+      const method = k[selector];
+      return method === undefined ? null : method.types;
+    });
+  },
+
+  hasIvar(className, name) {
+    const k = C[className];
+    if (k === undefined) return false;
+    const getter = new NativeFunction(Module.getGlobalExportByName('class_getInstanceVariable'), 'pointer', ['pointer', 'pointer']);
+    return !getter(k.handle, Memory.allocUtf8String(name)).isNull();
+  },
+
+  model() {
+    return onMain(() => {
+      const e = env(), entities = e.model.entities(), out = {};
+      for (let i = 0; i < Number(entities.count()); i++) {
+        const d = entities.objectAtIndex_(i), props = d.propertiesByName(), keys = props.allKeys(), properties = {};
+        for (let j = 0; j < Number(keys.count()); j++) {
+          const p = props.objectForKey_(keys.objectAtIndex_(j));
+          properties[keys.objectAtIndex_(j).toString()] = kindOf(p, C.NSRelationshipDescription)
+            ? { to: p.destinationEntity().name().toString(), many: Boolean(p.isToMany()) } : { type: Number(p.attributeType()) };
+        }
+        const sup = d.superentity(), subs = d.subentities(), sub = [];
+        for (let j = 0; j < Number(subs.count()); j++) sub.push(subs.objectAtIndex_(j).name().toString());
+        out[d.name().toString()] = { cls: d.managedObjectClassName().toString(), parent: isNil(sup) ? null : sup.name().toString(),
+                                      children: sub, properties };
+      }
+      return out;
     });
   },
 
